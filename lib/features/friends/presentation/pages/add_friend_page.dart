@@ -20,11 +20,33 @@ class AddFriendPage extends ConsumerStatefulWidget {
 class _AddFriendPageState extends ConsumerState<AddFriendPage> {
   final _ctrl = TextEditingController();
   String _searchQuery = '';
+  List<OllyUser> _remoteResults = [];
+  bool _isSearching = false;
 
   @override
   void dispose() {
     _ctrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _onSearch(String val) async {
+    final q = val.trim();
+    setState(() {
+      _searchQuery = q;
+      _isSearching = q.isNotEmpty;
+    });
+    if (q.isEmpty) {
+      setState(() => _remoteResults = []);
+      return;
+    }
+    final notifier = ref.read(socialRelationshipsProvider.notifier);
+    final results = await notifier.searchUsersRemote(q);
+    if (mounted) {
+      setState(() {
+        _remoteResults = results;
+        _isSearching = false;
+      });
+    }
   }
 
   @override
@@ -33,10 +55,11 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
     final socialState = ref.watch(socialRelationshipsProvider);
     final socialNotifier = ref.read(socialRelationshipsProvider.notifier);
 
-    final isSearching = _searchQuery.trim().isNotEmpty;
+    final hasQuery = _searchQuery.isNotEmpty;
     final selfId = profileIdentity.value.id.toLowerCase();
-    final results = isSearching
-        ? socialNotifier.searchUsers(_searchQuery)
+
+    final displayList = hasQuery
+        ? _remoteResults
         : allUsersRegistry.where((u) => u.id.toLowerCase() != selfId).toList();
 
     return Scaffold(
@@ -168,19 +191,28 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: Row(
                 children: [
-                  Icon(Icons.search_rounded,
-                      color: colors.textTertiary, size: 21),
+                  if (_isSearching)
+                    SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: colors.primary,
+                      ),
+                    )
+                  else
+                    Icon(Icons.search_rounded,
+                        color: colors.textTertiary, size: 21),
                   const Gap(10),
                   Expanded(
                     child: TextField(
                       controller: _ctrl,
                       autofocus: true,
-                      onChanged: (val) =>
-                          setState(() => _searchQuery = val.trim()),
+                      onChanged: _onSearch,
                       style: TextStyle(
                           color: colors.textPrimary, fontSize: 14.5),
                       decoration: InputDecoration(
-                        hintText: 'Kullanıcı ID (örn: OL-1002) veya @kullanıcı...',
+                        hintText: 'İsim, @kullanıcı veya Olly ID...',
                         hintStyle: TextStyle(
                             color: colors.textTertiary, fontSize: 13),
                         border: InputBorder.none,
@@ -194,7 +226,10 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                     GestureDetector(
                       onTap: () {
                         _ctrl.clear();
-                        setState(() => _searchQuery = '');
+                        setState(() {
+                          _searchQuery = '';
+                          _remoteResults = [];
+                        });
                       },
                       child: Icon(Icons.close_rounded,
                           size: 18, color: colors.textTertiary),
@@ -204,9 +239,9 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
             ),
           ),
 
-          // ─── Kullanıcı Sonuçları Listesi ───────────────────────────
+          // ─── Kullanıcı Sonuçları Listesi ────────────────────────────
           Expanded(
-            child: results.isEmpty
+            child: displayList.isEmpty
                 ? Center(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -214,7 +249,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
-                            isSearching
+                            hasQuery
                                 ? Icons.search_off_rounded
                                 : Icons.person_search_rounded,
                             size: 54,
@@ -222,7 +257,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                           ),
                           const Gap(14),
                           Text(
-                            isSearching
+                            hasQuery
                                 ? 'Kullanıcı bulunamadı'
                                 : 'Arkadaşlarını Keşfet',
                             style: TextStyle(
@@ -233,9 +268,9 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                           ),
                           const Gap(6),
                           Text(
-                            isSearching
+                            hasQuery
                                 ? 'ID veya kullanıcı adını kontrol edip tekrar deneyin.'
-                                : 'Yukarıdaki arama çubuğuna arkadaşının Olly ID\'sini veya kullanıcı adını yazarak anında ekleyebilirsin.',
+                                : 'Yukarıdaki arama çubuğuna arkadaşının adını, kullanıcı adını veya Olly ID\'sini yazarak anında ekleyebilirsin.',
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               fontSize: 13,
@@ -249,12 +284,12 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                   )
                 : ListView.separated(
                     padding: const EdgeInsets.fromLTRB(20, 0, 20, 40),
-                    itemCount: results.length,
+                    itemCount: displayList.length,
                     separatorBuilder: (_, __) => const Gap(10),
                     itemBuilder: (context, index) {
-                      final user = results[index];
-                      final isFriend = socialState.friends
-                          .any((f) => f.id == user.id);
+                      final user = displayList[index];
+                      final isFriend =
+                          socialState.friends.any((f) => f.id == user.id);
                       final isFollowing =
                           socialState.followingIds.contains(user.id);
                       final hasSent =
@@ -338,7 +373,6 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                                 ),
                               ),
                               const Gap(10),
-                              // Takip Ediliyor / Takip Et Butonu
                               if (isFollowing || isFriend)
                                 GestureDetector(
                                   onTap: () {
@@ -388,8 +422,8 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                                   decoration: BoxDecoration(
                                     color: colors.surfaceElevated,
                                     borderRadius: BorderRadius.circular(12),
-                                    border:
-                                        Border.all(color: colors.glassBorder),
+                                    border: Border.all(
+                                        color: colors.glassBorder),
                                   ),
                                   child: Text(
                                     'İstek Gönderildi',
@@ -409,7 +443,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                                         .showSnackBar(
                                       SnackBar(
                                         content: Text(
-                                            '${user.name} takip edildi ve arkadaşlara eklendi!'),
+                                            '${user.name} arkadaşlara eklendi!'),
                                         behavior: SnackBarBehavior.floating,
                                       ),
                                     );
@@ -437,7 +471,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                                             size: 14, color: Colors.white),
                                         Gap(4),
                                         Text(
-                                          'Takip Et',
+                                          'Ekle',
                                           style: TextStyle(
                                             color: Colors.white,
                                             fontSize: 12,
@@ -452,7 +486,8 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                           ),
                         ),
                       )
-                          .animate(delay: Duration(milliseconds: index * 40))
+                          .animate(
+                              delay: Duration(milliseconds: index * 40))
                           .fadeIn()
                           .slideY(begin: 0.08);
                     },

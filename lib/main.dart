@@ -7,6 +7,7 @@ import 'core/router/app_router.dart';
 import 'core/supabase/supabase_service.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_store.dart';
+import 'features/profile/presentation/profile_identity_store.dart';
 import 'features/voice_rooms/data/voice_mic_session.dart';
 import 'features/voice_rooms/presentation/voice_rooms_store.dart';
 
@@ -16,6 +17,10 @@ Future<void> main() async {
   // Load env variables
   await dotenv.load();
   await SupabaseService.instance.initialize();
+
+  // Kullanıcı kimliğini SharedPreferences'dan yükle
+  await loadProfileIdentity();
+
   initVoiceRoomsSync();
   bindVoiceMicToStore();
 

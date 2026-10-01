@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/auth/presentation/pages/login_page.dart';
 import '../../features/auth/presentation/pages/register_page.dart';
+import '../../features/auth/presentation/pages/onboarding_page.dart';
 import '../../features/friends/presentation/pages/friends_page.dart';
 import '../../features/friends/presentation/pages/add_friend_page.dart';
 import '../../features/messaging/presentation/pages/conversations_page.dart';
@@ -17,10 +18,12 @@ import '../../features/profile/presentation/pages/edit_profile_page.dart';
 import '../../features/profile/presentation/pages/connections_page.dart';
 import '../../features/profile/presentation/pages/profile_settings_page.dart';
 import '../../features/profile/presentation/pages/public_profile_page.dart';
+import '../../features/profile/presentation/profile_identity_store.dart';
 import '../widgets/shell/main_shell.dart';
 
 /// Route isimleri — magic string'lerden kaçınmak için.
 abstract final class AppRoutes {
+  static const onboarding = '/onboarding';
   static const login = '/login';
   static const register = '/register';
   static const friends = '/friends';
@@ -40,22 +43,30 @@ final appRouterProvider = Provider<GoRouter>((ref) {
     initialLocation: AppRoutes.friends,
     debugLogDiagnostics: true,
     redirect: (context, state) {
-      // TODO: Auth guard — Firebase auth state'e göre redirect
-      // final isLoggedIn = ref.read(authStateProvider).value != null;
-      // if (!isLoggedIn && state.matchedLocation != AppRoutes.login) return AppRoutes.login;
+      // Onboarding guard — kullanıcı setup yapmamışsa onboarding'e yönlendir
+      final setupDone = profileSetupDone;
+      final onOnboarding = state.matchedLocation == AppRoutes.onboarding;
+      if (!setupDone && !onOnboarding) return AppRoutes.onboarding;
+      if (setupDone && onOnboarding) return AppRoutes.friends;
       return null;
     },
     routes: [
-      // ─── Auth Routes ────────────────────────────────────────
+      // ─── Onboarding ─────────────────────────────────────────
+      GoRoute(
+        path: AppRoutes.onboarding,
+        name: 'onboarding',
+        builder: (_, __) => const OnboardingPage(),
+      ),
+      // ─── Auth Routes (legacy — onboarding ile değiştirildi) ──
       GoRoute(
         path: AppRoutes.login,
         name: 'login',
-        builder: (_, __) => const LoginPage(),
+        builder: (_, __) => const OnboardingPage(),
       ),
       GoRoute(
         path: AppRoutes.register,
         name: 'register',
-        builder: (_, __) => const RegisterPage(),
+        builder: (_, __) => const OnboardingPage(),
       ),
 
       // ─── Main Shell (Floating Pill Bar) ─────────────────────

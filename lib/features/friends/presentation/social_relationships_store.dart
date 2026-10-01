@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/supabase/supabase_service.dart';
 import '../../../../core/sync/cross_tab_sync.dart';
@@ -258,7 +259,7 @@ class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
     });
   }
 
-  /// ID, kullanıcı adı veya isim ile arama yapar
+  /// ID, kullanıcı adı veya isim ile arama yapar — önce Supabase, sonra local
   List<OllyUser> searchUsers(String query) {
     final clean = query.trim().toLowerCase();
     if (clean.isEmpty) return [];
@@ -273,6 +274,53 @@ class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
       final matchName = user.name.toLowerCase().contains(clean);
       return matchId || matchUsername || matchName;
     }).toList();
+  }
+
+  /// Supabase profiles tablosundan kullanıcı arar ve local registry'e ekler
+  Future<List<OllyUser>> searchUsersRemote(String query) async {
+    final clean = query.trim();
+    if (clean.isEmpty) return [];
+
+    if (!SupabaseService.instance.isInitialized) {
+      return searchUsers(clean);
+    }
+
+    try {
+      final selfId = profileIdentity.value.id;
+      final q = clean.startsWith('@') ? clean.substring(1) : clean;
+
+      final rows = await SupabaseService.instance.client
+          .from('profiles')
+          .select('id, olly_id, username, name, bio, status_note, is_online, is_verified')
+          .or('username.ilike.%$q%,name.ilike.%$q%,olly_id.ilike.%$q%')
+          .neq('id', selfId)
+          .limit(20);
+
+      final remoteUsers = (rows as List<dynamic>).map((r) {
+        final map = r as Map<String, dynamic>;
+        return OllyUser(
+          id: map['id'] as String? ?? map['olly_id'] as String? ?? '',
+          username: map['username'] as String? ?? '',
+          name: map['name'] as String? ?? '',
+          statusNote: map['status_note'] as String? ?? 'Çevrimiçi',
+          bio: map['bio'] as String?,
+          isOnline: map['is_online'] as bool? ?? false,
+          isVerified: map['is_verified'] as bool? ?? false,
+        );
+      }).where((u) => u.id.isNotEmpty).toList();
+
+      // Merge into local registry
+      for (final u in remoteUsers) {
+        if (!allUsersRegistry.any((r) => r.id == u.id)) {
+          allUsersRegistry.insert(0, u);
+        }
+      }
+
+      return remoteUsers;
+    } catch (e) {
+      debugPrint('[Social] remote search error: $e');
+      return searchUsers(clean);
+    }
   }
 
   /// ID ile arkadaşlık isteği gönderir ve sekmeler arası canlı senkronize eder
