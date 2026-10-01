@@ -24,7 +24,7 @@ android {
         applicationId = "com.socialsphere.olly"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21  // LiveKit WebRTC requires API 21+
+        minSdk = 23  // androidx.core 1.18+ requires API 23+
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
