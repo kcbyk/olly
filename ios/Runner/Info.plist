@@ -4,6 +4,12 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Olly sesli odalarda konuşabilmek için mikrofonuna ihtiyaç duyuyor.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Olly profil fotoğrafı seçmek için kamerana ihtiyaç duyuyor.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Olly profil fotoğrafı seçmek için fotoğraf kütüphanene ihtiyaç duyuyor.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

@@ -50,6 +50,7 @@ dependencies:
   equatable: ^2.0.5
   dartz: ^0.10.1
   timeago: ^3.7.0
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_test:
