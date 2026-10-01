@@ -788,6 +788,43 @@ class _ConversationDetail {
   final List<_ChatMessage> messages;
 }
 
+class _CommunityBanner extends StatelessWidget {
+  const _CommunityBanner({required this.name});
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colors.surfaceElevated,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.glassBorder),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.lock_outline_rounded, size: 12, color: colors.textTertiary),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              '$name ile mesajların uçtan uca şifrelidir.',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                color: colors.textTertiary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 _ConversationDetail _resolveConversation(String id) {
   final user = findUserByIdOrAlias(id);
 
