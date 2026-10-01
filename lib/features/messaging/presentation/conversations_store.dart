@@ -85,54 +85,8 @@ class ConversationsState {
 class ConversationsNotifier extends StateNotifier<ConversationsState> {
   ConversationsNotifier()
       : super(const ConversationsState(
-          conversations: [
-            ModernConversation(
-              id: 'user_ayse',
-              name: 'Ayşe Kaya',
-              lastMessage: 'Bugün odaya katılıyor musun? 🎙️',
-              time: '14:32',
-              unread: 3,
-              isOnline: true,
-            ),
-            ModernConversation(
-              id: 'user_mert',
-              name: 'Mert Demir',
-              lastMessage: 'Harika bir konuşmaydı, teşekkürler!',
-              time: '12:05',
-              unread: 0,
-              isOnline: false,
-            ),
-            ModernConversation(
-              id: 'user_zeynep',
-              name: 'Zeynep Arslan',
-              lastMessage: 'Sesli mesaj bıraktım 🎤',
-              time: 'Dün',
-              unread: 1,
-              isOnline: true,
-              isVoiceMessage: true,
-            ),
-            ModernConversation(
-              id: 'user_can',
-              name: 'Can Yıldız',
-              lastMessage: 'Tamam görüşürüz 👋',
-              time: 'Dün',
-              unread: 0,
-              isOnline: false,
-            ),
-            ModernConversation(
-              id: 'user_elif',
-              name: 'Elif Şahin',
-              lastMessage: 'Olly çok güzel bir uygulama olmuş!',
-              time: 'Pzt',
-              unread: 0,
-              isOnline: true,
-            ),
-          ],
-          pinned: [
-            PinnedUser(id: 'user_ayse', name: 'Ayşe Kaya', isOnline: true, hasUnread: true),
-            PinnedUser(id: 'user_mert', name: 'Mert Demir', isOnline: false),
-            PinnedUser(id: 'user_zeynep', name: 'Zeynep Arslan', isOnline: true, hasUnread: true),
-          ],
+          conversations: [],
+          pinned: [],
         )) {
     _initCrossTabSync();
   }
