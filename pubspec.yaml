@@ -1,0 +1,87 @@
+name: olly
+description: A social app with friend management, messaging, and voice rooms.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ─── State Management & DI ───────────────────────────────────
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+
+  # ─── Navigation ──────────────────────────────────────────────
+  go_router: ^14.2.7
+
+  # ─── Models & Serialization ──────────────────────────────────
+  freezed_annotation: ^2.4.1
+  json_annotation: ^4.9.0
+
+  # ─── Supabase (PostgreSQL & Realtime WebSocket) ──────────────
+  supabase_flutter: ^2.8.0
+
+  # ─── Voice Rooms (LiveKit WebRTC SFU) ────────────────────────
+  livekit_client: ^2.2.0
+
+  # ─── Local DB (Offline-first messaging) ──────────────────────
+  shared_preferences: ^2.2.3
+  drift: ^2.20.2
+  sqlite3_flutter_libs: ^0.5.24
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # ─── UI & Animations ─────────────────────────────────────────
+  video_player: ^2.9.2
+  cached_network_image: ^3.4.0
+  image_picker: ^1.1.2
+  flutter_animate: ^4.5.0
+  shimmer: ^3.0.0
+  gap: ^3.0.1
+
+  # ─── Utils ───────────────────────────────────────────────────
+  flutter_dotenv: ^5.1.0
+  http: ^1.2.2
+  intl: ^0.19.0
+  uuid: ^4.4.0
+  equatable: ^2.0.5
+  dartz: ^0.10.1
+  timeago: ^3.7.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # ─── Code Generation ─────────────────────────────────────────
+  build_runner: ^2.4.11
+  freezed: ^2.5.2
+  json_serializable: ^6.8.0
+  riverpod_generator: ^2.4.0
+  drift_dev: ^2.20.2
+  custom_lint: ^0.6.4
+  riverpod_lint: ^2.3.10
+
+  # ─── Linting ─────────────────────────────────────────────────
+  very_good_analysis: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/videos/
+    - assets/videos/discover_header_bg.mp4
+    - assets/videos/whatsapp_video.mp4
+    - assets/videos/messages_header_bg.mp4
+    - assets/videos/whatsapp_video_messages.mp4
+    - assets/videos/rooms_header_bg.mp4
+    - assets/videos/whatsapp_video_rooms.mp4
+    - assets/videos/profile_cover_bg.mp4
+    - assets/videos/whatsapp_video_profile.mp4
+    - assets/images/
+    - assets/images/room_empty_seat.png
+    - assets/images/room_owner_badge.png
+    - assets/icons/
+    - assets/icons/add_friend.png
+    - .env
