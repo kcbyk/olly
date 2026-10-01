@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: olly-voice-token-server
+    runtime: node
+    rootDir: voice-token-server
+    buildCommand: npm install
+    startCommand: npm start
+    region: frankfurt
+    plan: free
+    envVars:
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
