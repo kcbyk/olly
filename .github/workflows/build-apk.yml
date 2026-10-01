@@ -30,12 +30,12 @@ jobs:
       - name: Create .env file
         run: |
           cat > .env << 'EOF'
-          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
-          LIVEKIT_URL=${{ secrets.LIVEKIT_URL }}
-          LIVEKIT_API_KEY=${{ secrets.LIVEKIT_API_KEY }}
+          SUPABASE_URL=https://mteznqxhksgyzetqclmi.supabase.co
+          SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im10ZXpucXhoa3NneXpldHFjbG1pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3MDQ3ODcsImV4cCI6MjEwNjI4MDc4N30.k8eZlKOQyxOE7miOi7sCdaLvRdI6BWJacRyP86vedPg
+          LIVEKIT_URL=wss://selam-jgwrn9n6.livekit.cloud
+          LIVEKIT_API_KEY=APIiemCPDaM4oYTL
           LIVEKIT_API_SECRET=${{ secrets.LIVEKIT_API_SECRET }}
-          VOICE_TOKEN_SERVER_URL=${{ secrets.VOICE_TOKEN_SERVER_URL }}
+          VOICE_TOKEN_SERVER_URL=https://olly-zbiv.onrender.com
           EOF
 
       - name: Install dependencies
@@ -51,7 +51,7 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
 
-      - name: Build APK (split per ABI)
+      - name: Build split APKs (arm64, armeabi, x86_64)
         run: flutter build apk --release --split-per-abi --no-tree-shake-icons
 
       - name: Upload split APKs
