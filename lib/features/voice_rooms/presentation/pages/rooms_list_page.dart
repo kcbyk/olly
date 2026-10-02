@@ -60,6 +60,7 @@ class _RoomsListPageState extends ConsumerState<RoomsListPage> {
             valueListenable: voiceRooms,
             builder: (context, snapshot, _) {
               final visibleRooms = snapshot.rooms.where((r) {
+                if (!r.isActive) return false;
                 if (_selectedCategory == 'Tümü') return true;
                 if (_selectedCategory == 'Arkadaşlar') {
                   final isHostFriend = friendNames.contains(r.hostName);

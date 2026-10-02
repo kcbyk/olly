@@ -109,6 +109,7 @@ class VoiceRoom {
     required this.announcement,
     required this.seats,
     required this.messages,
+    this.isActive = true,
     this.extraListeners = 0,
     this.lockedSeats = const [],
     this.mutedSeats = const [],
@@ -122,6 +123,7 @@ class VoiceRoom {
   final String category;
   final String displayId;
   final String announcement;
+  final bool isActive;
   final List<VoiceSeatOccupant?> seats;
   final List<VoiceChatLine> messages;
   final int extraListeners;
@@ -152,6 +154,7 @@ class VoiceRoom {
     String? category,
     String? displayId,
     String? announcement,
+    bool? isActive,
     List<VoiceSeatOccupant?>? seats,
     List<VoiceChatLine>? messages,
     int? extraListeners,
@@ -168,6 +171,7 @@ class VoiceRoom {
         category: category ?? this.category,
         displayId: displayId ?? this.displayId,
         announcement: announcement ?? this.announcement,
+        isActive: isActive ?? this.isActive,
         seats: seats ?? this.seats,
         messages: messages ?? this.messages,
         extraListeners: extraListeners ?? this.extraListeners,
@@ -184,6 +188,7 @@ class VoiceRoom {
         'category': category,
         'displayId': displayId,
         'announcement': announcement,
+        'isActive': isActive,
         'seats': seats.map((s) => s?.toJson()).toList(),
         'messages': messages.map((m) => m.toJson()).toList(),
         'extraListeners': extraListeners,
@@ -201,6 +206,9 @@ class VoiceRoom {
         category: json['category'] as String? ?? 'Sohbet',
         displayId: (json['display_id'] ?? json['displayId']) as String? ?? '',
         announcement: json['announcement'] as String? ?? '',
+        isActive: json['is_active'] == false || json['isActive'] == false
+            ? false
+            : true,
         seats: (json['seats'] as List<dynamic>? ?? [])
             .map((s) => s != null
                 ? VoiceSeatOccupant.fromJson(s as Map<String, dynamic>)
@@ -251,7 +259,7 @@ class VoiceRoomsSnapshot {
 
   VoiceRoom? byId(String id) {
     for (final room in rooms) {
-      if (room.id == id) return room;
+      if (room.id == id && room.isActive) return room;
     }
     return null;
   }
@@ -261,8 +269,9 @@ class VoiceRoomsSnapshot {
 
   VoiceRoom? get myRoom => rooms
       .where((room) =>
-          room.hostId == profileIdentity.value.id ||
-          (room.hostId == null && room.hostName == kCurrentUserName))
+          room.isActive &&
+          (room.hostId == profileIdentity.value.id ||
+              (room.hostId == null && room.hostName == kCurrentUserName)))
       .firstOrNull;
 
   bool get iAmListening =>
@@ -273,9 +282,10 @@ class VoiceRoomsSnapshot {
     Set<String> friendNames = const {},
     Set<String> followedNames = const {},
   }) {
-    if (category == 'Tümü') return rooms;
+    final activeRooms = rooms.where((room) => room.isActive).toList();
+    if (category == 'Tümü') return activeRooms;
     if (category == 'Arkadaşlar') {
-      return rooms.where((r) {
+      return activeRooms.where((r) {
         final isHostFriend = friendNames.contains(r.hostName);
         final hasFriendInSeats = r.seats
             .whereType<VoiceSeatOccupant>()
@@ -284,7 +294,7 @@ class VoiceRoomsSnapshot {
       }).toList();
     }
     if (category == 'Takip Edilen') {
-      return rooms.where((r) {
+      return activeRooms.where((r) {
         final isHostFollowed = followedNames.contains(r.hostName);
         final hasFollowedInSeats = r.seats
             .whereType<VoiceSeatOccupant>()
@@ -292,13 +302,13 @@ class VoiceRoomsSnapshot {
         return isHostFollowed || hasFollowedInSeats;
       }).toList();
     }
-    return rooms.where((r) => r.category == category).toList();
+    return activeRooms.where((r) => r.category == category).toList();
   }
 
   List<VoicePresence> get activePeople {
     final seen = <String>{};
     final people = <VoicePresence>[];
-    for (final room in rooms) {
+    for (final room in rooms.where((room) => room.isActive)) {
       for (final seat in room.seats.whereType<VoiceSeatOccupant>()) {
         if (seat.isMe) continue;
         final key = seat.name;
@@ -442,6 +452,8 @@ bool _crossTabInitialized = false;
 Timer? _voiceRoomsRefreshTimer;
 Future<void> _voiceRoomWriteQueue = Future<void>.value();
 final Set<String> _pendingRoomPersistenceIds = <String>{};
+final Set<String> _locallyClosedRoomIds = <String>{};
+final Set<String> _pendingRoomDeactivationIds = <String>{};
 StreamSubscription<Map<String, dynamic>>? _voiceCrossTabSubscription;
 
 void initVoiceRoomsSync() {
@@ -475,6 +487,7 @@ void initVoiceRoomsSync() {
     final roomsList = rawRooms
         .whereType<Map>()
         .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw)))
+        .where((room) => room.isActive)
         .toList();
     _isSyncingFromRemote = true;
     try {
@@ -504,6 +517,11 @@ Future<void> _refreshRemoteRooms() async {
     final loaded = (rows as List<dynamic>)
         .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw as Map)))
         .toList();
+    for (final room in loaded) {
+      if (_locallyClosedRoomIds.contains(room.id)) {
+        _queueRoomDeactivation(room);
+      }
+    }
     _applyRemoteRows(loaded.map((room) => room.toJson()).toList());
   } catch (e) {
     debugPrint('[VoiceRooms] remote refresh error: $e');
@@ -514,7 +532,10 @@ void _applyRemoteRows(List<dynamic> rows) {
   final loaded = rows
       .whereType<Map>()
       .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw)))
-      .where((room) => room.id.isNotEmpty)
+      .where((room) =>
+          room.id.isNotEmpty &&
+          room.isActive &&
+          !_locallyClosedRoomIds.contains(room.id))
       .map((room) => room.copyWith(
             // isMe is intentionally omitted from the shared JSON. Restore it
             // on each device from the current profile name.
@@ -579,7 +600,7 @@ Map<String, dynamic> _roomPayload(VoiceRoom room) {
     'announcement': room.announcement,
     'seats': seatsForDb,
     'extra_listeners': room.extraListeners,
-    'is_active': true,
+    'is_active': room.isActive,
     'last_notice': room.lastNotice,
     'updated_at': DateTime.now().toUtc().toIso8601String(),
   };
@@ -625,7 +646,11 @@ void _queueRoomPersistence(Iterable<VoiceRoom> rooms) {
 }
 
 void _queueRoomDeactivation(VoiceRoom room) {
-  if (!SupabaseService.instance.isInitialized) return;
+  if (!SupabaseService.instance.isInitialized ||
+      _pendingRoomDeactivationIds.contains(room.id)) {
+    return;
+  }
+  _pendingRoomDeactivationIds.add(room.id);
 
   _voiceRoomWriteQueue = _voiceRoomWriteQueue.then((_) async {
     try {
@@ -637,15 +662,31 @@ void _queueRoomDeactivation(VoiceRoom room) {
             'last_notice': 'Oda kapatıldı',
           })
           .eq('id', room.id);
+      _pendingRoomDeactivationIds.remove(room.id);
+      _locallyClosedRoomIds.remove(room.id);
     } catch (e) {
+      // Keep it hidden locally; the next refresh will enqueue a retry while
+      // the server row is still active.
+      _pendingRoomDeactivationIds.remove(room.id);
       debugPrint('[VoiceRooms] room close error: $e');
     }
   });
 }
 
 void _commit(VoiceRoomsSnapshot next, {bool broadcast = true}) {
-  voiceRooms.value = next;
-  final myRoom = next.myRoom;
+  final activeRooms =
+      next.rooms.where((room) => room.isActive).toList(growable: false);
+  final normalizedJoinedId = activeRooms.any((room) => room.id == next.joinedRoomId)
+      ? next.joinedRoomId
+      : null;
+  final normalized = VoiceRoomsSnapshot(
+    rooms: activeRooms,
+    joinedRoomId: normalizedJoinedId,
+    selfMuted: normalizedJoinedId == null ? false : next.selfMuted,
+    selfHandRaised: normalizedJoinedId == null ? false : next.selfHandRaised,
+  );
+  voiceRooms.value = normalized;
+  final myRoom = normalized.myRoom;
   if (myRoom != null) {
     unawaited(_saveLocalMyRoom(myRoom));
   }
@@ -654,10 +695,10 @@ void _commit(VoiceRoomsSnapshot next, {bool broadcast = true}) {
     try {
       CrossTabSyncService.instance.emit({
         'type': 'voice_rooms_sync',
-        'rooms': next.rooms.map((room) => room.toJson()).toList(),
+        'rooms': normalized.rooms.map((room) => room.toJson()).toList(),
       });
     } catch (_) {}
-    _queueRoomPersistence(next.rooms);
+    _queueRoomPersistence(normalized.rooms);
   }
 }
 
@@ -698,6 +739,7 @@ void closeVoiceRoom(String id) {
   final nextJoined = current.joinedRoomId == id
       ? null
       : current.joinedRoomId;
+  _locallyClosedRoomIds.add(id);
   _pendingRoomPersistenceIds.remove(id);
   _commit(
     VoiceRoomsSnapshot(
@@ -718,8 +760,9 @@ String createVoiceRoom({
   final current = voiceRooms.value;
   final existingMyRoom = current.rooms
       .where((r) =>
-          r.hostId == profileIdentity.value.id ||
-          (r.hostId == null && r.hostName == kCurrentUserName))
+          r.isActive &&
+          (r.hostId == profileIdentity.value.id ||
+              (r.hostId == null && r.hostName == kCurrentUserName)))
       .firstOrNull;
 
   final id = existingMyRoom?.id ?? 'r-${const Uuid().v4().substring(0, 8)}';
@@ -764,6 +807,7 @@ String createVoiceRoom({
 
   final otherRooms = current.rooms
       .where((r) =>
+          r.isActive &&
           r.id != id &&
           r.hostId != profileIdentity.value.id &&
           !(r.hostId == null && r.hostName == kCurrentUserName))
