@@ -70,8 +70,10 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       _supabaseSub = SupabaseService.instance.client
           .from('messages')
           .stream(primaryKey: ['id'])
+          .order('created_at', ascending: true)
           .listen((rows) {
         if (!mounted) return;
+        // Bu konuşmaya ait mesajları filtrele
         final relevant = rows.where((r) =>
             (r['sender_id'] == peerId && r['receiver_id'] == selfId) ||
             (r['sender_id'] == selfId && r['receiver_id'] == peerId)).toList();
@@ -86,7 +88,6 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               time: timeStr,
             );
           }).toList();
-          // Stream'den gelen veri ile optimistic mesajların yerini al
           setState(() {
             _messages = history;
           });

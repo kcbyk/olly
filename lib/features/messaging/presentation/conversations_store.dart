@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/supabase/supabase_service.dart';
 import '../../../core/sync/cross_tab_sync.dart';
 import '../../friends/presentation/social_relationships_store.dart';
 import '../../profile/presentation/profile_identity_store.dart';
@@ -92,6 +93,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   }
 
   void _initCrossTabSync() {
+    // CrossTab: aynı cihaz farklı sekmelerde çalışır
     CrossTabSyncService.instance.stream.listen((event) {
       final type = event['type'] as String?;
       if (type == 'CHAT_MESSAGE') {
@@ -102,7 +104,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         final text = event['text'] as String? ?? '';
         final time = event['time'] as String? ?? 'Şimdi';
 
-        // Gelen mesaj bana mı ait?
         if (toId != null &&
             (toId == self.id.toLowerCase() ||
                 toId == self.username.toLowerCase())) {
@@ -118,6 +119,37 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         }
       }
     });
+
+    // Supabase Realtime: farklı cihazlar arası gerçek zamanlı mesajlar
+    if (SupabaseService.instance.isInitialized) {
+      final selfId = profileIdentity.value.id;
+      SupabaseService.instance.client
+          .from('messages')
+          .stream(primaryKey: ['id'])
+          .eq('receiver_id', selfId)
+          .listen((rows) {
+        for (final r in rows) {
+          final senderId = r['sender_id'] as String? ?? '';
+          if (senderId == selfId) continue; // kendi mesajlarını atla
+          final content = r['content'] as String? ?? '';
+          final created = DateTime.tryParse(
+                  r['created_at']?.toString() ?? '') ??
+              DateTime.now();
+          final timeStr =
+              '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
+
+          final sender = findUserByIdOrAlias(senderId);
+          recordIncomingMessage(
+            peerId: senderId,
+            peerName: sender.name.isNotEmpty && sender.name != senderId
+                ? sender.name
+                : senderId,
+            text: content,
+            time: timeStr,
+          );
+        }
+      });
+    }
   }
 
   /// Gelen mesajı listenin en başına ekler/günceller ve okunmamış sayısını artırır
