@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/supabase/supabase_service.dart';
 import '../../../core/sync/cross_tab_sync.dart';
@@ -123,32 +124,40 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     // Supabase Realtime: farklı cihazlar arası gerçek zamanlı mesajlar
     if (SupabaseService.instance.isInitialized) {
       final selfId = profileIdentity.value.id;
+      // Realtime channel — INSERT eventlerini dinle
       SupabaseService.instance.client
-          .from('messages')
-          .stream(primaryKey: ['id'])
-          .eq('receiver_id', selfId)
-          .listen((rows) {
-        for (final r in rows) {
-          final senderId = r['sender_id'] as String? ?? '';
-          if (senderId == selfId) continue; // kendi mesajlarını atla
-          final content = r['content'] as String? ?? '';
-          final created = DateTime.tryParse(
-                  r['created_at']?.toString() ?? '') ??
-              DateTime.now();
-          final timeStr =
-              '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-
-          final sender = findUserByIdOrAlias(senderId);
-          recordIncomingMessage(
-            peerId: senderId,
-            peerName: sender.name.isNotEmpty && sender.name != senderId
-                ? sender.name
-                : senderId,
-            text: content,
-            time: timeStr,
-          );
-        }
-      });
+          .channel('messages_incoming_$selfId')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.insert,
+            schema: 'public',
+            table: 'messages',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'receiver_id',
+              value: selfId,
+            ),
+            callback: (payload) {
+              final r = payload.newRecord;
+              final senderId = r['sender_id'] as String? ?? '';
+              if (senderId == selfId) return;
+              final content = r['content'] as String? ?? '';
+              final created = DateTime.tryParse(
+                      r['created_at']?.toString() ?? '') ??
+                  DateTime.now();
+              final timeStr =
+                  '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
+              final sender = findUserByIdOrAlias(senderId);
+              recordIncomingMessage(
+                peerId: senderId,
+                peerName: sender.name.isNotEmpty && sender.name != senderId
+                    ? sender.name
+                    : senderId,
+                text: content,
+                time: timeStr,
+              );
+            },
+          )
+          .subscribe();
     }
   }
 

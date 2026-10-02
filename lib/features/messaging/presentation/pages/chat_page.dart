@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gap/gap.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../../core/constants/app_colors.dart';
 import '../../../../core/supabase/supabase_service.dart';
@@ -27,7 +28,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   late _ConversationDetail _conversation;
   late List<_ChatMessage> _messages;
   StreamSubscription? _syncSub;
-  StreamSubscription? _supabaseSub;
+  RealtimeChannel? _supabaseChannel;
 
   @override
   void initState() {
@@ -67,39 +68,62 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         });
       }).catchError((_) {});
 
-      _supabaseSub = SupabaseService.instance.client
-          .from('messages')
-          .stream(primaryKey: ['id'])
-          .order('created_at', ascending: true)
-          .listen((rows) {
-        if (!mounted) return;
-        // Bu konuşmaya ait mesajları filtrele
-        final relevant = rows.where((r) =>
-            (r['sender_id'] == peerId && r['receiver_id'] == selfId) ||
-            (r['sender_id'] == selfId && r['receiver_id'] == peerId)).toList();
-        if (relevant.isNotEmpty) {
-          final history = relevant.map((r) {
-            final isMe = r['sender_id'] == selfId;
-            final created = DateTime.tryParse(r['created_at']?.toString() ?? '') ?? DateTime.now();
-            final timeStr = '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-            return _ChatMessage(
-              text: r['content']?.toString() ?? '',
-              isMine: isMe,
-              time: timeStr,
-            );
-          }).toList();
-          setState(() {
-            _messages = history;
-          });
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (_scrollController.hasClients) {
-              _scrollController.jumpTo(
-                _scrollController.position.maxScrollExtent,
-              );
-            }
-          });
-        }
-      });
+      _supabaseChannel = SupabaseService.instance.client
+          .channel('chat_${selfId}_$peerId')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.insert,
+            schema: 'public',
+            table: 'messages',
+            callback: (payload) {
+              if (!mounted) return;
+              final r = payload.newRecord;
+              final rSender = r['sender_id'] as String? ?? '';
+              final rReceiver = r['receiver_id'] as String? ?? '';
+              // Sadece bu konuşmaya ait mesajları işle
+              if (!((rSender == peerId && rReceiver == selfId) ||
+                  (rSender == selfId && rReceiver == peerId))) return;
+              final isMe = rSender == selfId;
+              final created = DateTime.tryParse(
+                      r['created_at']?.toString() ?? '') ??
+                  DateTime.now();
+              final timeStr =
+                  '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
+              setState(() {
+                // Optimistic duplicate'i önle
+                final text = r['content']?.toString() ?? '';
+                final alreadyExists = _messages.any(
+                    (m) => m.text == text && m.isMine == isMe && m.isOptimistic);
+                if (alreadyExists && isMe) {
+                  // Optimistic mesajı gerçeğiyle değiştir
+                  final idx = _messages.lastIndexWhere(
+                      (m) => m.text == text && m.isMine && m.isOptimistic);
+                  if (idx >= 0) {
+                    _messages[idx] = _ChatMessage(
+                      text: text,
+                      isMine: true,
+                      time: timeStr,
+                    );
+                  }
+                } else if (!isMe) {
+                  _messages.add(_ChatMessage(
+                    text: text,
+                    isMine: false,
+                    time: timeStr,
+                  ));
+                }
+              });
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (_scrollController.hasClients) {
+                  _scrollController.animateTo(
+                    _scrollController.position.maxScrollExtent,
+                    duration: const Duration(milliseconds: 260),
+                    curve: Curves.easeOutCubic,
+                  );
+                }
+              });
+            },
+          )
+          .subscribe();
     }
 
     // Diğer tarayıcı sekmelerinden gelen anlık mesajları dinle
@@ -157,7 +181,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   @override
   void dispose() {
     _syncSub?.cancel();
-    _supabaseSub?.cancel();
+    if (_supabaseChannel != null) {
+      SupabaseService.instance.client.removeChannel(_supabaseChannel!);
+    }
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();

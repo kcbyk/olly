@@ -188,9 +188,10 @@ class VoiceRoom {
   factory VoiceRoom.fromJson(Map<String, dynamic> json) => VoiceRoom(
         id: json['id'] as String? ?? '',
         title: json['title'] as String? ?? '',
-        hostName: json['hostName'] as String? ?? '',
+        // Supabase snake_case + local camelCase her ikisini destekle
+        hostName: (json['host_name'] ?? json['hostName']) as String? ?? '',
         category: json['category'] as String? ?? 'Sohbet',
-        displayId: json['displayId'] as String? ?? '',
+        displayId: (json['display_id'] ?? json['displayId']) as String? ?? '',
         announcement: json['announcement'] as String? ?? '',
         seats: (json['seats'] as List<dynamic>? ?? [])
             .map((s) => s != null
@@ -200,14 +201,14 @@ class VoiceRoom {
         messages: (json['messages'] as List<dynamic>? ?? [])
             .map((m) => VoiceChatLine.fromJson(m as Map<String, dynamic>))
             .toList(),
-        extraListeners: json['extraListeners'] as int? ?? 0,
+        extraListeners: ((json['extra_listeners'] ?? json['extraListeners']) as num?)?.toInt() ?? 0,
         lockedSeats: (json['lockedSeats'] as List<dynamic>? ?? [])
             .map((e) => (e as num).toInt())
             .toList(),
         mutedSeats: (json['mutedSeats'] as List<dynamic>? ?? [])
             .map((e) => (e as num).toInt())
             .toList(),
-        lastNotice: json['lastNotice'] as String?,
+        lastNotice: (json['last_notice'] ?? json['lastNotice']) as String?,
       );
 }
 
@@ -508,15 +509,19 @@ void _commit(VoiceRoomsSnapshot next, {bool broadcast = true}) {
     if (SupabaseService.instance.isInitialized) {
       try {
         for (final r in next.rooms) {
+          // isMe flag'ini Supabase'e yazma — her cihaz kendi isMe'sini bilir
+          final seatsForDb = r.seats
+              .map((s) => s != null ? s.copyWith(isMe: false).toJson() : null)
+              .toList();
           SupabaseService.instance.client.from('voice_rooms').upsert({
             'id': r.id,
             'title': r.title,
             'host_name': r.hostName,
-            'host_id': r.hostName,
+            'host_id': r.id, // oda ID'sini host_id olarak kullan
             'category': r.category,
             'display_id': r.displayId,
             'announcement': r.announcement,
-            'seats': r.seats.map((s) => s?.toJson()).toList(),
+            'seats': seatsForDb,
             'extra_listeners': r.extraListeners,
             'is_active': true,
             'last_notice': r.lastNotice,

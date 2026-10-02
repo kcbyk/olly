@@ -1,6 +1,6 @@
 import 'dart:async';
 
-/// Non-web / test stub for cross-tab sync
+/// Non-web stub — in-process loopback so same-device scenarios work on mobile/desktop
 class CrossTabSyncPlatform {
   final _controller = StreamController<Map<String, dynamic>>.broadcast();
 
@@ -9,7 +9,10 @@ class CrossTabSyncPlatform {
   void init() {}
 
   void postMessage(Map<String, dynamic> data) {
-    // In-memory loopback or broadcast for tests/stub
+    // Loopback: emit back to own stream so listeners on the same device receive it
+    if (!_controller.isClosed) {
+      _controller.add(data);
+    }
   }
 
   void dispose() {
