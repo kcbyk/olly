@@ -4,8 +4,11 @@ import 'package:uuid/uuid.dart';
 
 import '../../../../core/supabase/supabase_service.dart';
 import '../../../../core/sync/cross_tab_sync.dart';
+import '../../profile/presentation/profile_identity_store.dart';
 
-const kCurrentUserName = 'Senol O.';
+
+/// Mevcut kullanıcının adını döner — profil kimliğinden alınır
+String get kCurrentUserName => profileIdentity.value.name;
 
 class VoiceSeatOccupant {
   const VoiceSeatOccupant({
@@ -875,16 +878,4 @@ void updateRoomTitle(String id, String title) {
   }
 }
 
-final _seedRooms = <VoiceRoom>[
-  VoiceRoom(
-    id: 'r-senol-room',
-    title: 'Senol O. Sohbet Odası',
-    hostName: kCurrentUserName,
-    category: 'Sohbet',
-    displayId: '7288574',
-    announcement: 'Hoş geldin! Birlikte sohbet edelim.',
-    seats: _seats([]),
-    messages: const [],
-    extraListeners: 0,
-  ),
-];
+final _seedRooms = <VoiceRoom>[];

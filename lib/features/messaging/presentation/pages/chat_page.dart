@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gap/gap.dart';
@@ -86,8 +86,16 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               time: timeStr,
             );
           }).toList();
+          // Stream'den gelen veri ile optimistic mesajların yerini al
           setState(() {
             _messages = history;
+          });
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollController.hasClients) {
+              _scrollController.jumpTo(
+                _scrollController.position.maxScrollExtent,
+              );
+            }
           });
         }
       });
@@ -160,15 +168,33 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final self = profileIdentity.value;
     final timeStr = TimeOfDay.now().format(context);
 
-    setState(() {
-      _messages.add(_ChatMessage(
-        text: text,
-        isMine: true,
-        time: timeStr,
-      ));
-      _controller.clear();
-      _canSend = false;
-    });
+    // Supabase aktifse stream zaten mesajı getirecek — sadece local ekle
+    // Supabase yoksa direkt listeye ekle
+    final addLocally = !SupabaseService.instance.isInitialized;
+
+    if (addLocally) {
+      setState(() {
+        _messages.add(_ChatMessage(
+          text: text,
+          isMine: true,
+          time: timeStr,
+        ));
+      });
+    } else {
+      // Supabase stream güncellemeyi sağlar, ama optimistic UI için ekle
+      // ve stream gelince duplicate'i önlemek için flag kullan
+      setState(() {
+        _messages.add(_ChatMessage(
+          text: text,
+          isMine: true,
+          time: timeStr,
+          isOptimistic: true,
+        ));
+      });
+    }
+
+    _controller.clear();
+    setState(() => _canSend = false);
 
     ref.read(conversationsProvider.notifier).recordOutgoingMessage(
           peerId: _conversation.id,
@@ -760,6 +786,7 @@ class _ChatMessage {
     this.read = false,
     this.invite = false,
     this.audio = false,
+    this.isOptimistic = false,
   });
 
   final String text;
@@ -768,6 +795,7 @@ class _ChatMessage {
   final bool read;
   final bool invite;
   final bool audio;
+  final bool isOptimistic;
 }
 
 class _ConversationDetail {
