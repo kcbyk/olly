@@ -78,10 +78,16 @@ class VoiceMiniBar extends StatelessWidget {
                     ),
                   ),
                   IconButton(
-                    tooltip: 'Odadan ayrıl',
+                    tooltip: isVoiceRoomHost(room)
+                        ? 'Odayı kapat'
+                        : 'Odadan ayrıl',
                     onPressed: () {
                       HapticFeedback.mediumImpact();
-                      leaveVoiceRoom(room.id);
+                      if (isVoiceRoomHost(room)) {
+                        closeVoiceRoom(room.id);
+                      } else {
+                        leaveVoiceRoom(room.id);
+                      }
                     },
                     icon: Icon(
                       Icons.call_end_rounded,

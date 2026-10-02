@@ -65,7 +65,12 @@ class _RoomPageState extends State<RoomPage> {
   }
 
   void _leave() {
-    leaveVoiceRoom(widget.roomId);
+    final room = voiceRoomById(widget.roomId);
+    if (room != null && isVoiceRoomHost(room)) {
+      closeVoiceRoom(widget.roomId);
+    } else {
+      leaveVoiceRoom(widget.roomId);
+    }
     if (mounted) context.pop();
   }
 

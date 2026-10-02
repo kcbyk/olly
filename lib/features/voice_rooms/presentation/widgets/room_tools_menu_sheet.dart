@@ -33,6 +33,7 @@ class RoomToolsMenuSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isHost = isVoiceRoomHost(room);
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -147,23 +148,27 @@ class RoomToolsMenuSheet extends StatelessWidget {
                     color: const Color(0xFFFFECEF),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(
-                    Icons.logout_rounded,
-                    color: Color(0xFFFF3358),
+                  child: Icon(
+                    isHost
+                        ? Icons.cancel_presentation_rounded
+                        : Icons.logout_rounded,
+                    color: const Color(0xFFFF3358),
                     size: 22,
                   ),
                 ),
-                title: const Text(
-                  'Odadan Ayrıl',
-                  style: TextStyle(
+                title: Text(
+                  isHost ? 'Odayı Kapat' : 'Odadan Ayrıl',
+                  style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w600,
                     color: Color(0xFFFF3358),
                   ),
                 ),
-                subtitle: const Text(
-                  'Mevcut odadan çıkış yap',
-                  style: TextStyle(
+                subtitle: Text(
+                  isHost
+                      ? 'Odayı tüm kullanıcılar için kapat'
+                      : 'Mevcut odadan çıkış yap',
+                  style: const TextStyle(
                     fontSize: 12,
                     color: Color(0xFF888888),
                   ),

@@ -342,6 +342,21 @@ Future<void> _saveLocalMyRoom(VoiceRoom room) async {
   }
 }
 
+Future<void> _clearLocalMyRoom() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await Future.wait([
+      prefs.remove(_kPrefSavedMyRoomId),
+      prefs.remove(_kPrefSavedMyRoomTitle),
+      prefs.remove(_kPrefSavedMyRoomCategory),
+      prefs.remove(_kPrefSavedMyRoomDisplayId),
+      prefs.remove(_kPrefSavedMyRoomAnnouncement),
+    ]);
+  } catch (e) {
+    debugPrint('Local voice room clear error: $e');
+  }
+}
+
 Future<void> _loadLocalRoomData() async {
   try {
     final prefs = await SharedPreferences.getInstance();
@@ -415,10 +430,18 @@ final voiceRooms = ValueNotifier<VoiceRoomsSnapshot>(
 
 VoiceRoom? voiceRoomById(String id) => voiceRooms.value.byId(id);
 
+bool isVoiceRoomHost(VoiceRoom room) {
+  final hostId = room.hostId;
+  return hostId == profileIdentity.value.id ||
+      ((hostId == null || hostId.isEmpty) &&
+          room.hostName == kCurrentUserName);
+}
+
 bool _isSyncingFromRemote = false;
 bool _crossTabInitialized = false;
 Timer? _voiceRoomsRefreshTimer;
 Future<void> _voiceRoomWriteQueue = Future<void>.value();
+final Set<String> _pendingRoomPersistenceIds = <String>{};
 StreamSubscription<Map<String, dynamic>>? _voiceCrossTabSubscription;
 
 void initVoiceRoomsSync() {
@@ -511,7 +534,8 @@ void _applyRemoteRows(List<dynamic> rows) {
       .where((room) =>
           (room.hostId == profileIdentity.value.id ||
               (room.hostId == null && room.hostName == kCurrentUserName)) &&
-          !remoteIds.contains(room.id))
+          !remoteIds.contains(room.id) &&
+          _pendingRoomPersistenceIds.contains(room.id))
       .toList();
   if (localOnly.isNotEmpty) {
     _queueRoomPersistence(localOnly);
@@ -565,16 +589,56 @@ void _queueRoomPersistence(Iterable<VoiceRoom> rooms) {
   if (!SupabaseService.instance.isInitialized) return;
   final snapshot = rooms.toList(growable: false);
   if (snapshot.isEmpty) return;
+  _pendingRoomPersistenceIds.addAll(snapshot.map((room) => room.id));
 
   _voiceRoomWriteQueue = _voiceRoomWriteQueue.then((_) async {
     for (final room in snapshot) {
       try {
-        await SupabaseService.instance.client
-            .from('voice_rooms')
-            .upsert(_roomPayload(room), onConflict: 'id');
+        final payload = _roomPayload(room);
+        if (isVoiceRoomHost(room)) {
+          // Only the owner creates/reactivates a room. This also keeps the
+          // initial local room write reliable.
+          await SupabaseService.instance.client
+              .from('voice_rooms')
+              .upsert(payload, onConflict: 'id');
+        } else {
+          // Participants may update seats and counters, but must never be
+          // able to resurrect a room after its owner closed it.
+          payload
+            ..remove('id')
+            ..remove('is_active');
+          await SupabaseService.instance.client
+              .from('voice_rooms')
+              .update(payload)
+              .eq('id', room.id)
+              .eq('is_active', true);
+        }
+        _pendingRoomPersistenceIds.remove(room.id);
       } catch (e) {
+        // Stale local data must not revive an explicitly closed room after a
+        // later refresh. A future local change can enqueue it again.
+        _pendingRoomPersistenceIds.remove(room.id);
         debugPrint('[VoiceRooms] room write error: $e');
       }
+    }
+  });
+}
+
+void _queueRoomDeactivation(VoiceRoom room) {
+  if (!SupabaseService.instance.isInitialized) return;
+
+  _voiceRoomWriteQueue = _voiceRoomWriteQueue.then((_) async {
+    try {
+      await SupabaseService.instance.client
+          .from('voice_rooms')
+          .update({
+            'is_active': false,
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+            'last_notice': 'Oda kapatıldı',
+          })
+          .eq('id', room.id);
+    } catch (e) {
+      debugPrint('[VoiceRooms] room close error: $e');
     }
   });
 }
@@ -622,6 +686,29 @@ VoiceRoomsSnapshot _mapRoom(
 @visibleForTesting
 void resetVoiceRoomsForTest() {
   _commit(VoiceRoomsSnapshot(rooms: List<VoiceRoom>.from(_seedRooms)), broadcast: false);
+}
+
+/// Oda sahibi odayı kapattığında oda hem yerel listeden hem de Supabase'den
+/// kaldırılır. Dinleyiciler odadan ayrıldığında oda açık kalmaya devam eder.
+void closeVoiceRoom(String id) {
+  final room = voiceRoomById(id);
+  if (room == null || !isVoiceRoomHost(room)) return;
+
+  final current = voiceRooms.value;
+  final nextJoined = current.joinedRoomId == id
+      ? null
+      : current.joinedRoomId;
+  _pendingRoomPersistenceIds.remove(id);
+  _commit(
+    VoiceRoomsSnapshot(
+      rooms: current.rooms.where((item) => item.id != id).toList(),
+      joinedRoomId: nextJoined,
+      selfMuted: nextJoined == null ? false : current.selfMuted,
+      selfHandRaised: false,
+    ),
+  );
+  _queueRoomDeactivation(room);
+  unawaited(_clearLocalMyRoom());
 }
 
 String createVoiceRoom({
