@@ -1,9 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../../core/supabase/supabase_service.dart';
-import '../../../../core/sync/cross_tab_sync.dart';
+import '../../../core/supabase/supabase_service.dart';
+import '../../../core/sync/cross_tab_sync.dart';
 import '../../profile/presentation/profile_identity_store.dart';
 
 
@@ -101,6 +103,7 @@ class VoiceRoom {
     required this.id,
     required this.title,
     required this.hostName,
+    this.hostId,
     required this.category,
     required this.displayId,
     required this.announcement,
@@ -115,6 +118,7 @@ class VoiceRoom {
   final String id;
   final String title;
   final String hostName;
+  final String? hostId;
   final String category;
   final String displayId;
   final String announcement;
@@ -144,6 +148,7 @@ class VoiceRoom {
     String? id,
     String? title,
     String? hostName,
+    String? hostId,
     String? category,
     String? displayId,
     String? announcement,
@@ -159,6 +164,7 @@ class VoiceRoom {
         id: id ?? this.id,
         title: title ?? this.title,
         hostName: hostName ?? this.hostName,
+        hostId: hostId ?? this.hostId,
         category: category ?? this.category,
         displayId: displayId ?? this.displayId,
         announcement: announcement ?? this.announcement,
@@ -174,6 +180,7 @@ class VoiceRoom {
         'id': id,
         'title': title,
         'hostName': hostName,
+        'hostId': hostId,
         'category': category,
         'displayId': displayId,
         'announcement': announcement,
@@ -190,6 +197,7 @@ class VoiceRoom {
         title: json['title'] as String? ?? '',
         // Supabase snake_case + local camelCase her ikisini destekle
         hostName: (json['host_name'] ?? json['hostName']) as String? ?? '',
+        hostId: (json['host_id'] ?? json['hostId']) as String?,
         category: json['category'] as String? ?? 'Sohbet',
         displayId: (json['display_id'] ?? json['displayId']) as String? ?? '',
         announcement: json['announcement'] as String? ?? '',
@@ -251,8 +259,11 @@ class VoiceRoomsSnapshot {
   VoiceRoom? get joinedRoom =>
       joinedRoomId == null ? null : byId(joinedRoomId!);
 
-  VoiceRoom? get myRoom =>
-      rooms.where((r) => r.hostName == kCurrentUserName).firstOrNull;
+  VoiceRoom? get myRoom => rooms
+      .where((room) =>
+          room.hostId == profileIdentity.value.id ||
+          (room.hostId == null && room.hostName == kCurrentUserName))
+      .firstOrNull;
 
   bool get iAmListening =>
       joinedRoom != null && joinedRoom?.iAmSeated != true;
@@ -346,8 +357,10 @@ Future<void> _loadLocalRoomData() async {
               'Hoş geldin! Birlikte sohbet edelim.';
 
       final current = voiceRooms.value;
-      final existingIndex = current.rooms.indexWhere(
-          (r) => r.id == savedId || r.hostName == kCurrentUserName);
+      final existingIndex = current.rooms.indexWhere((r) =>
+          r.id == savedId ||
+          r.hostId == profileIdentity.value.id ||
+          (r.hostId == null && r.hostName == kCurrentUserName));
       if (existingIndex >= 0) {
         final existing = current.rooms[existingIndex];
         final updated = existing.copyWith(
@@ -372,6 +385,7 @@ Future<void> _loadLocalRoomData() async {
           id: savedId,
           title: savedTitle,
           hostName: kCurrentUserName,
+          hostId: profileIdentity.value.id,
           category: savedCategory,
           displayId: savedDisplayId,
           announcement: savedAnnouncement,
@@ -403,89 +417,163 @@ VoiceRoom? voiceRoomById(String id) => voiceRooms.value.byId(id);
 
 bool _isSyncingFromRemote = false;
 bool _crossTabInitialized = false;
+Timer? _voiceRoomsRefreshTimer;
+Future<void> _voiceRoomWriteQueue = Future<void>.value();
+StreamSubscription<Map<String, dynamic>>? _voiceCrossTabSubscription;
 
 void initVoiceRoomsSync() {
   if (_crossTabInitialized) return;
   _crossTabInitialized = true;
 
-  // Yerel depodan kaydedilen oda başlığı ve ayarlarını yükle
-  _loadLocalRoomData();
+  // Yerel depodan kaydedilen oda başlığı ve ayarlarını yükle.
+  unawaited(_loadLocalRoomData());
 
-  // Supabase bağlantısı aktif ise ilk odaları çek ve Realtime dinle
   if (SupabaseService.instance.isInitialized) {
-    SupabaseService.instance.client
-        .from('voice_rooms')
-        .select()
-        .eq('is_active', true)
-        .then((rows) {
-      if (rows.isNotEmpty) {
-        final loaded = rows
-            .map((r) => VoiceRoom.fromJson(r as Map<String, dynamic>))
-            .toList();
-        _isSyncingFromRemote = true;
-        try {
-          final current = voiceRooms.value;
-          _commit(
-            VoiceRoomsSnapshot(
-              rooms: loaded,
-              joinedRoomId: current.joinedRoomId,
-              selfMuted: current.selfMuted,
-              selfHandRaised: current.selfHandRaised,
-            ),
-            broadcast: false,
-          );
-        } finally {
-          _isSyncingFromRemote = false;
-        }
-      }
-    }).catchError((_) {});
+    unawaited(_refreshRemoteRooms());
 
+    // Realtime hızlı yoldur; aşağıdaki timer publication/realtime ayarı eksik
+    // bir projede bile odaların diğer cihazlara ulaşmasını sağlar.
     SupabaseService.instance.client
         .from('voice_rooms')
         .stream(primaryKey: ['id'])
-        .listen((rows) {
-      final loaded = rows
-          .where((r) => r['is_active'] == true)
-          .map((r) => VoiceRoom.fromJson(r as Map<String, dynamic>))
-          .toList();
-      _isSyncingFromRemote = true;
-      try {
-        final current = voiceRooms.value;
-        _commit(
-          VoiceRoomsSnapshot(
-            rooms: loaded,
-            joinedRoomId: current.joinedRoomId,
-            selfMuted: current.selfMuted,
-            selfHandRaised: current.selfHandRaised,
-          ),
-          broadcast: false,
-        );
-      } finally {
-        _isSyncingFromRemote = false;
-      }
+        .eq('is_active', true)
+        .listen(_applyRemoteRows, onError: (Object error) {
+      debugPrint('[VoiceRooms] realtime error: $error');
     });
+    _voiceRoomsRefreshTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => unawaited(_refreshRemoteRooms()),
+    );
   }
 
-  CrossTabSyncService.instance.stream.listen((data) {
-    if (data['type'] == 'voice_rooms_sync') {
-      final rawRooms = data['rooms'] as List<dynamic>? ?? [];
-      final roomsList = rawRooms
-          .map((r) => VoiceRoom.fromJson(r as Map<String, dynamic>))
-          .toList();
-      _isSyncingFromRemote = true;
+  _voiceCrossTabSubscription = CrossTabSyncService.instance.stream.listen((data) {
+    if (data['type'] != 'voice_rooms_sync') return;
+    final rawRooms = data['rooms'] as List<dynamic>? ?? [];
+    final roomsList = rawRooms
+        .whereType<Map>()
+        .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw)))
+        .toList();
+    _isSyncingFromRemote = true;
+    try {
+      final current = voiceRooms.value;
+      _commit(
+        VoiceRoomsSnapshot(
+          rooms: roomsList,
+          joinedRoomId: current.joinedRoomId,
+          selfMuted: current.selfMuted,
+          selfHandRaised: current.selfHandRaised,
+        ),
+        broadcast: false,
+      );
+    } finally {
+      _isSyncingFromRemote = false;
+    }
+  });
+}
+
+Future<void> _refreshRemoteRooms() async {
+  if (!SupabaseService.instance.isInitialized) return;
+  try {
+    final rows = await SupabaseService.instance.client
+        .from('voice_rooms')
+        .select()
+        .eq('is_active', true);
+    final loaded = (rows as List<dynamic>)
+        .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw as Map)))
+        .toList();
+    _applyRemoteRows(loaded.map((room) => room.toJson()).toList());
+  } catch (e) {
+    debugPrint('[VoiceRooms] remote refresh error: $e');
+  }
+}
+
+void _applyRemoteRows(List<dynamic> rows) {
+  final loaded = rows
+      .whereType<Map>()
+      .map((raw) => VoiceRoom.fromJson(Map<String, dynamic>.from(raw)))
+      .where((room) => room.id.isNotEmpty)
+      .map((room) => room.copyWith(
+            // isMe is intentionally omitted from the shared JSON. Restore it
+            // on each device from the current profile name.
+            seats: room.seats
+                .map((seat) => seat == null
+                    ? null
+                    : seat.copyWith(isMe: seat.name == kCurrentUserName))
+                .toList(),
+          ))
+      .toList();
+  final current = voiceRooms.value;
+  final remoteIds = loaded.map((room) => room.id).toSet();
+
+  // A room restored from SharedPreferences may not have reached Supabase yet.
+  // Do not let an empty realtime snapshot erase it; persist it and merge it.
+  final localOnly = current.rooms
+      .where((room) =>
+          (room.hostId == profileIdentity.value.id ||
+              (room.hostId == null && room.hostName == kCurrentUserName)) &&
+          !remoteIds.contains(room.id))
+      .toList();
+  if (localOnly.isNotEmpty) {
+    _queueRoomPersistence(localOnly);
+  }
+
+  final merged = [...localOnly, ...loaded];
+  final joinedId = merged.any((room) => room.id == current.joinedRoomId)
+      ? current.joinedRoomId
+      : null;
+  _isSyncingFromRemote = true;
+  try {
+    _commit(
+      VoiceRoomsSnapshot(
+        rooms: merged,
+        joinedRoomId: joinedId,
+        selfMuted: current.selfMuted,
+        selfHandRaised: current.selfHandRaised,
+      ),
+      broadcast: false,
+    );
+  } finally {
+    _isSyncingFromRemote = false;
+  }
+}
+
+Map<String, dynamic> _roomPayload(VoiceRoom room) {
+  // isMe is device-local state and must never be copied into the shared row.
+  final seatsForDb = room.seats
+      .map((seat) => seat == null
+          ? null
+          : seat.copyWith(isMe: false).toJson())
+      .toList();
+  return {
+    'id': room.id,
+    'title': room.title,
+    'host_name': room.hostName,
+    'host_id': room.hostId ??
+        (room.hostName == kCurrentUserName ? profileIdentity.value.id : ''),
+    'category': room.category,
+    'display_id': room.displayId,
+    'announcement': room.announcement,
+    'seats': seatsForDb,
+    'extra_listeners': room.extraListeners,
+    'is_active': true,
+    'last_notice': room.lastNotice,
+    'updated_at': DateTime.now().toUtc().toIso8601String(),
+  };
+}
+
+void _queueRoomPersistence(Iterable<VoiceRoom> rooms) {
+  if (!SupabaseService.instance.isInitialized) return;
+  final snapshot = rooms.toList(growable: false);
+  if (snapshot.isEmpty) return;
+
+  _voiceRoomWriteQueue = _voiceRoomWriteQueue.then((_) async {
+    for (final room in snapshot) {
       try {
-        final current = voiceRooms.value;
-        _commit(
-          VoiceRoomsSnapshot(
-            rooms: roomsList,
-            joinedRoomId: current.joinedRoomId,
-            selfMuted: current.selfMuted,
-            selfHandRaised: current.selfHandRaised,
-          ),
-          broadcast: false,
-        );
-      } finally {
-        _isSyncingFromRemote = false;
+        await SupabaseService.instance.client
+            .from('voice_rooms')
+            .upsert(_roomPayload(room), onConflict: 'id');
+      } catch (e) {
+        debugPrint('[VoiceRooms] room write error: $e');
       }
     }
   });
@@ -495,40 +583,17 @@ void _commit(VoiceRoomsSnapshot next, {bool broadcast = true}) {
   voiceRooms.value = next;
   final myRoom = next.myRoom;
   if (myRoom != null) {
-    _saveLocalMyRoom(myRoom);
+    unawaited(_saveLocalMyRoom(myRoom));
   }
 
   if (broadcast && !_isSyncingFromRemote) {
     try {
       CrossTabSyncService.instance.emit({
         'type': 'voice_rooms_sync',
-        'rooms': next.rooms.map((r) => r.toJson()).toList(),
+        'rooms': next.rooms.map((room) => room.toJson()).toList(),
       });
     } catch (_) {}
-
-    if (SupabaseService.instance.isInitialized) {
-      try {
-        for (final r in next.rooms) {
-          // isMe flag'ini Supabase'e yazma — her cihaz kendi isMe'sini bilir
-          final seatsForDb = r.seats
-              .map((s) => s != null ? s.copyWith(isMe: false).toJson() : null)
-              .toList();
-          SupabaseService.instance.client.from('voice_rooms').upsert({
-            'id': r.id,
-            'title': r.title,
-            'host_name': r.hostName,
-            'host_id': r.id, // oda ID'sini host_id olarak kullan
-            'category': r.category,
-            'display_id': r.displayId,
-            'announcement': r.announcement,
-            'seats': seatsForDb,
-            'extra_listeners': r.extraListeners,
-            'is_active': true,
-            'last_notice': r.lastNotice,
-          });
-        }
-      } catch (_) {}
-    }
+    _queueRoomPersistence(next.rooms);
   }
 }
 
@@ -564,8 +629,11 @@ String createVoiceRoom({
   required String category,
 }) {
   final current = voiceRooms.value;
-  final existingMyRoom =
-      current.rooms.where((r) => r.hostName == kCurrentUserName).firstOrNull;
+  final existingMyRoom = current.rooms
+      .where((r) =>
+          r.hostId == profileIdentity.value.id ||
+          (r.hostId == null && r.hostName == kCurrentUserName))
+      .firstOrNull;
 
   final id = existingMyRoom?.id ?? 'r-${const Uuid().v4().substring(0, 8)}';
   final effectiveTitle = title.trim().isNotEmpty
@@ -585,6 +653,7 @@ String createVoiceRoom({
     id: id,
     title: effectiveTitle,
     hostName: kCurrentUserName,
+    hostId: profileIdentity.value.id,
     category: effectiveCategory,
     displayId: displayId,
     announcement: announcement,
@@ -607,7 +676,10 @@ String createVoiceRoom({
   _saveLocalMyRoom(room);
 
   final otherRooms = current.rooms
-      .where((r) => r.id != id && r.hostName != kCurrentUserName)
+      .where((r) =>
+          r.id != id &&
+          r.hostId != profileIdentity.value.id &&
+          !(r.hostId == null && r.hostName == kCurrentUserName))
       .toList();
   _commit(VoiceRoomsSnapshot(
     rooms: [room, ...otherRooms],
@@ -686,7 +758,9 @@ void leaveVoiceRoom(String id) {
 bool takeVoiceSeat(String id, [int? targetIndex]) {
   final room = voiceRoomById(id);
   if (room == null) return false;
-  final isHost = room.hostName == kCurrentUserName || room.me?.isHost == true;
+  final isHost = room.hostId == profileIdentity.value.id ||
+      (room.hostId == null && room.hostName == kCurrentUserName) ||
+      room.me?.isHost == true;
   final seats = [...room.seats];
 
   int index;
@@ -867,8 +941,10 @@ void updateRoomAnnouncement(String id, String text) {
   final room = voiceRoomById(id);
   _commit(_mapRoom(id, (r) => r.copyWith(announcement: trimmed)));
   if (room != null &&
-      (room.hostName == kCurrentUserName || room.me?.isHost == true)) {
-    _saveLocalMyRoom(room.copyWith(announcement: trimmed));
+      (room.hostId == profileIdentity.value.id ||
+          (room.hostId == null && room.hostName == kCurrentUserName) ||
+          room.me?.isHost == true)) {
+    unawaited(_saveLocalMyRoom(room.copyWith(announcement: trimmed)));
   }
 }
 
@@ -878,8 +954,10 @@ void updateRoomTitle(String id, String title) {
   final room = voiceRoomById(id);
   _commit(_mapRoom(id, (r) => r.copyWith(title: trimmed)));
   if (room != null &&
-      (room.hostName == kCurrentUserName || room.me?.isHost == true)) {
-    _saveLocalMyRoom(room.copyWith(title: trimmed));
+      (room.hostId == profileIdentity.value.id ||
+          (room.hostId == null && room.hostName == kCurrentUserName) ||
+          room.me?.isHost == true)) {
+    unawaited(_saveLocalMyRoom(room.copyWith(title: trimmed)));
   }
 }
 

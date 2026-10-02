@@ -31,7 +31,7 @@ jobs:
         run: |
           cat > .env << 'EOF'
           SUPABASE_URL=https://mteznqxhksgyzetqclmi.supabase.co
-          SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im10ZXpucXhoa3NneXpldHFjbG1pIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3MDQ3ODcsImV4cCI6MjEwNjI4MDc4N30.k8eZlKOQyxOE7miOi7sCdaLvRdI6BWJacRyP86vedPg
+          SUPABASE_PUBLISHABLE_KEY=sb_publishable_93VYIjYFm5KHOwd6n4WraA_hHZZst3O
           LIVEKIT_URL=wss://selam-jgwrn9n6.livekit.cloud
           LIVEKIT_API_KEY=APIiemCPDaM4oYTL
           LIVEKIT_API_SECRET=${{ secrets.LIVEKIT_API_SECRET }}

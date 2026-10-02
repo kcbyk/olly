@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../../core/supabase/supabase_service.dart';
-import '../../../../core/sync/cross_tab_sync.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../../core/supabase/supabase_service.dart';
+import '../../../core/sync/cross_tab_sync.dart';
 import '../../profile/presentation/profile_identity_store.dart';
 
-/// Gerçek kullanıcı modeli
+/// Gerçek kullanıcı modeli.
 class OllyUser {
   const OllyUser({
     required this.id,
@@ -53,22 +57,27 @@ class OllyUser {
       };
 
   factory OllyUser.fromJson(Map<String, dynamic> json) => OllyUser(
-        id: json['id'] as String? ?? 'OL-0000',
-        username: json['username'] as String? ?? '@kullanici',
-        name: json['name'] as String? ?? 'Olly Kullanıcısı',
-        statusNote: json['statusNote'] as String? ?? 'Çevrimiçi',
-        bio: json['bio'] as String?,
-        location: json['location'] as String? ?? 'Türkiye',
-        isOnline: json['isOnline'] as bool? ?? true,
-        inVoiceRoom: json['inVoiceRoom'] as bool? ?? false,
-        roomName: json['roomName'] as String?,
-        roomId: json['roomId'] as String?,
-        isVerified: json['isVerified'] as bool? ?? false,
+        id: (json['id'] ?? json['olly_id'])?.toString() ?? 'OL-0000',
+        username: json['username']?.toString() ?? '@kullanici',
+        name: json['name']?.toString() ?? 'Olly Kullanıcısı',
+        statusNote: (json['status_note'] ?? json['statusNote'])?.toString() ??
+            'Çevrimiçi',
+        bio: json['bio']?.toString(),
+        location: json['location']?.toString() ?? 'Türkiye',
+        isOnline: (json['is_online'] ?? json['isOnline']) as bool? ?? true,
+        inVoiceRoom: (json['inVoiceRoom'] ?? json['in_voice_room']) as bool? ??
+            false,
+        roomName: (json['roomName'] ?? json['room_name'])?.toString(),
+        roomId: (json['roomId'] ?? json['room_id'])?.toString(),
+        isVerified: (json['is_verified'] ?? json['isVerified']) as bool? ??
+            false,
         interests: (json['interests'] as List<dynamic>?)
                 ?.map((e) => e.toString())
                 .toList() ??
             const ['Sohbet', 'Müzik'],
-        mutualFriends: json['mutualFriends'] as int? ?? 0,
+        mutualFriends: (json['mutualFriends'] ?? json['mutual_friends']) is num
+            ? ((json['mutualFriends'] ?? json['mutual_friends']) as num).toInt()
+            : 0,
       );
 
   OllyUser copyWith({
@@ -104,37 +113,42 @@ class OllyUser {
   }
 }
 
-/// Tüm kayıtlı kullanıcılar rehberi
+/// Bu liste yalnızca hızlı yerel önbellektir. Kalıcı kaynak Supabase'dir.
 final List<OllyUser> allUsersRegistry = [];
 
-/// Kullanıcı ID'si veya alternatif ID'leri eşleyen yardımcı fonksiyon
+String _normalise(String value) => value.trim().toLowerCase();
+
+/// Kullanıcı ID'si, kullanıcı adı veya isim ile eşleşen kullanıcıyı döner.
 OllyUser findUserByIdOrAlias(String queryId) {
-  final clean = queryId.trim().toLowerCase();
-  for (final u in allUsersRegistry) {
-    if (u.id.toLowerCase() == clean ||
-        u.username.toLowerCase() == clean ||
-        u.username.toLowerCase() == '@$clean' ||
-        u.name.toLowerCase() == clean) {
-      return u;
+  final clean = _normalise(queryId);
+  final withoutAt = clean.startsWith('@') ? clean.substring(1) : clean;
+
+  for (final user in allUsersRegistry) {
+    final username = _normalise(user.username);
+    if (_normalise(user.id) == clean ||
+        username == clean ||
+        username == '@$withoutAt' ||
+        _normalise(user.name) == clean) {
+      return user;
     }
   }
 
-  // Bulunamadıysa dinamik kullanıcı profili oluştur ve rehbere kaydet
+  // Arama Supabase'e ulaşamasa bile mesaj/istek ekranı çökmesin. Bu geçici
+  // kayıt, gerçek profil geldiğinde remote hydration sırasında güncellenir.
   final newUser = OllyUser(
-    id: queryId.toUpperCase(),
-    username: queryId.startsWith('@') ? queryId.toLowerCase() : '@${queryId.toLowerCase().replaceAll(' ', '')}',
-    name: queryId,
+    id: queryId.trim().isEmpty ? 'OL-0000' : queryId.trim().toUpperCase(),
+    username: '@${withoutAt.replaceAll(' ', '')}',
+    name: queryId.trim().isEmpty ? 'Olly Kullanıcısı' : queryId.trim(),
     statusNote: 'Olly kullanıcısı',
     bio: 'Olly topluluğunda yeni bağlantılar kuruyor.',
     isOnline: true,
   );
-  if (!allUsersRegistry.any((u) => u.id == newUser.id)) {
+  if (!allUsersRegistry.any((u) => _normalise(u.id) == _normalise(newUser.id))) {
     allUsersRegistry.add(newUser);
   }
   return newUser;
 }
 
-/// Sosyal İlişkiler State Modeli
 class SocialState {
   const SocialState({
     required this.friends,
@@ -163,7 +177,7 @@ class SocialState {
   }
 }
 
-/// Sosyal İlişkiler Yönetim Notifier'ı (Riverpod)
+/// Sosyal ilişkilerin kalıcı kaynağını Supabase'e bağlayan notifier.
 class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
   SocialRelationshipsNotifier()
       : super(const SocialState(
@@ -173,12 +187,45 @@ class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
           sentRequestIds: {},
         )) {
     _initCrossTabSync();
+    _subscribeRemoteChanges();
+    _hydration = _loadRemoteRelationships();
+  }
+
+  late final Future<void> _hydration;
+  RealtimeChannel? _remoteChannel;
+  StreamSubscription<Map<String, dynamic>>? _crossTabSubscription;
+  Timer? _remotePollTimer;
+  bool _disposed = false;
+
+  void _registerUser(OllyUser user) {
+    final index = allUsersRegistry.indexWhere(
+      (item) => _normalise(item.id) == _normalise(user.id),
+    );
+    if (index >= 0) {
+      allUsersRegistry[index] = user;
+    } else {
+      allUsersRegistry.insert(0, user);
+    }
+  }
+
+  OllyUser _localUserForId(String id) {
+    for (final user in allUsersRegistry) {
+      if (_normalise(user.id) == _normalise(id)) return user;
+    }
+    return findUserByIdOrAlias(id);
+  }
+
+  bool _isCurrentUser(String? value) {
+    if (value == null) return false;
+    final clean = _normalise(value);
+    final self = profileIdentity.value;
+    return clean == _normalise(self.id) ||
+        clean == _normalise(self.username) ||
+        clean == _normalise(self.username.replaceFirst('@', ''));
   }
 
   void _initCrossTabSync() {
     final self = profileIdentity.value;
-
-    // Kendini yerel rehbere ekle ve diğer sekmelere anons et
     final selfUser = OllyUser(
       id: self.id,
       username: self.username,
@@ -186,150 +233,338 @@ class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
       statusNote: 'Çevrimiçi',
       isOnline: true,
     );
-
-    if (!allUsersRegistry.any((u) => u.id == self.id)) {
-      allUsersRegistry.insert(0, selfUser);
-    }
+    _registerUser(selfUser);
 
     CrossTabSyncService.instance.emit({
       'type': 'ANNOUNCE_USER',
       'user': selfUser.toJson(),
     });
 
-    // Diğer sekmelerden gelen canlı olayları dinle
-    CrossTabSyncService.instance.stream.listen((event) {
+    _crossTabSubscription = CrossTabSyncService.instance.stream.listen((event) {
       final type = event['type'] as String?;
-      if (type == 'ANNOUNCE_USER') {
-        final userData = event['user'];
-        if (userData is Map<String, dynamic>) {
-          final peerUser = OllyUser.fromJson(userData);
-          if (peerUser.id != self.id) {
-            final exists = allUsersRegistry.any((u) => u.id == peerUser.id);
-            if (!exists) {
-              allUsersRegistry.insert(0, peerUser);
+      final userData = event['user'];
+
+      if (type == 'ANNOUNCE_USER' || type == 'ANNOUNCE_USER_REPLY') {
+        if (userData is Map) {
+          final peerUser = OllyUser.fromJson(
+            Map<String, dynamic>.from(userData),
+          );
+          if (!_isCurrentUser(peerUser.id)) {
+            _registerUser(peerUser);
+            if (type == 'ANNOUNCE_USER') {
+              CrossTabSyncService.instance.emit({
+                'type': 'ANNOUNCE_USER_REPLY',
+                'user': selfUser.toJson(),
+              });
             }
-            // Karşılık olarak kendi kimliğini bildir
-            CrossTabSyncService.instance.emit({
-              'type': 'ANNOUNCE_USER_REPLY',
-              'user': selfUser.toJson(),
-            });
           }
         }
-      } else if (type == 'ANNOUNCE_USER_REPLY') {
-        final userData = event['user'];
-        if (userData is Map<String, dynamic>) {
-          final peerUser = OllyUser.fromJson(userData);
-          if (peerUser.id != self.id &&
-              !allUsersRegistry.any((u) => u.id == peerUser.id)) {
-            allUsersRegistry.insert(0, peerUser);
-          }
-        }
-      } else if (type == 'FRIEND_ADDED') {
-        final targetId = event['targetId'] as String?;
-        final fromData = event['fromUser'];
-        if (targetId != null &&
-            (targetId.toLowerCase() == self.id.toLowerCase() ||
-                targetId.toLowerCase() == self.username.toLowerCase())) {
-          if (fromData is Map<String, dynamic>) {
-            final senderUser = OllyUser.fromJson(fromData);
-            if (!allUsersRegistry.any((u) => u.id == senderUser.id)) {
-              allUsersRegistry.insert(0, senderUser);
-            }
-            final newFriends = List<OllyUser>.from(state.friends);
-            if (!newFriends.any((u) => u.id == senderUser.id)) {
-              newFriends.add(senderUser);
-            }
+        return;
+      }
+
+      final targetId = event['targetId'] as String?;
+      if (type == 'FRIEND_ADDED' && _isCurrentUser(targetId)) {
+        if (userData is Map) {
+          final sender = OllyUser.fromJson(Map<String, dynamic>.from(userData));
+          _registerUser(sender);
+          if (!state.friends.any((user) => user.id == sender.id)) {
             state = state.copyWith(
-              friends: newFriends,
-              followersIds: {...state.followersIds, senderUser.id},
+              friends: [...state.friends, sender],
+              followersIds: {...state.followersIds, sender.id},
             );
           }
         }
-      } else if (type == 'FOLLOW_USER') {
-        final targetId = event['targetId'] as String?;
+      } else if (type == 'FRIEND_REMOVED' && _isCurrentUser(targetId)) {
         final fromId = event['fromId'] as String?;
-        if (targetId != null &&
-            targetId.toLowerCase() == self.id.toLowerCase() &&
-            fromId != null) {
+        if (fromId != null) {
+          state = state.copyWith(
+            friends: state.friends
+                .where((user) => _normalise(user.id) != _normalise(fromId))
+                .toList(),
+          );
+        }
+      } else if (type == 'FOLLOW_USER' && _isCurrentUser(targetId)) {
+        final fromId = event['fromId'] as String?;
+        if (fromId != null) {
           state = state.copyWith(
             followersIds: {...state.followersIds, fromId},
+          );
+        }
+      } else if (type == 'UNFOLLOW_USER' && _isCurrentUser(targetId)) {
+        final fromId = event['fromId'] as String?;
+        if (fromId != null) {
+          state = state.copyWith(
+            followersIds: state.followersIds
+                .where((id) => _normalise(id) != _normalise(fromId))
+                .toSet(),
           );
         }
       }
     });
   }
 
-  /// ID, kullanıcı adı veya isim ile arama yapar — önce Supabase, sonra local
+  void _subscribeRemoteChanges() {
+    if (!SupabaseService.instance.isInitialized) return;
+
+    final selfId = profileIdentity.value.id;
+    final channel = SupabaseService.instance.client
+        .channel('social_relationships_$selfId');
+
+    for (final event in [
+      PostgresChangeEvent.insert,
+      PostgresChangeEvent.update,
+      PostgresChangeEvent.delete,
+    ]) {
+      channel.onPostgresChanges(
+        event: event,
+        schema: 'public',
+        table: 'friendships',
+        callback: (_) => unawaited(_loadRemoteRelationships()),
+      );
+      channel.onPostgresChanges(
+        event: event,
+        schema: 'public',
+        table: 'follows',
+        callback: (_) => unawaited(_loadRemoteRelationships()),
+      );
+    }
+
+    _remoteChannel = channel..subscribe();
+    _remotePollTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => unawaited(_loadRemoteRelationships()),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>?> _loadFriendshipRows(String selfId) async {
+    try {
+      final outgoing = await SupabaseService.instance.client
+          .from('friendships')
+          .select('user_id, friend_id, status')
+          .eq('user_id', selfId);
+      final incoming = await SupabaseService.instance.client
+          .from('friendships')
+          .select('user_id, friend_id, status')
+          .eq('friend_id', selfId);
+      return [
+        ...(outgoing as List<dynamic>).map(
+          (row) => Map<String, dynamic>.from(row as Map),
+        ),
+        ...(incoming as List<dynamic>).map(
+          (row) => Map<String, dynamic>.from(row as Map),
+        ),
+      ];
+    } catch (e) {
+      debugPrint('[Social] friendship sync error: $e');
+      return null;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>?> _loadFollowRows(
+    String selfId, {
+    required bool following,
+  }) async {
+    try {
+      final query = SupabaseService.instance.client
+          .from('follows')
+          .select('follower_id, following_id');
+      final rows = following
+          ? await query.eq('follower_id', selfId)
+          : await query.eq('following_id', selfId);
+      return (rows as List<dynamic>)
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+    } catch (e) {
+      debugPrint('[Social] follow sync error: $e');
+      return null;
+    }
+  }
+
+  Future<Map<String, OllyUser>> _loadProfiles(Set<String> ids) async {
+    if (ids.isEmpty || !SupabaseService.instance.isInitialized) return {};
+
+    final result = <String, OllyUser>{};
+    try {
+      final rows = await SupabaseService.instance.client
+          .from('profiles')
+          .select(
+              'id, olly_id, username, name, bio, status_note, location, is_online, is_verified, interests')
+          .inFilter('id', ids.toList());
+      for (final raw in rows as List<dynamic>) {
+        final user = OllyUser.fromJson(Map<String, dynamic>.from(raw as Map));
+        result[_normalise(user.id)] = user;
+        _registerUser(user);
+      }
+    } catch (e) {
+      debugPrint('[Social] profile hydration error: $e');
+    }
+    return result;
+  }
+
+  Future<void> _loadRemoteRelationships() async {
+    if (_disposed || !SupabaseService.instance.isInitialized) return;
+
+    final selfId = profileIdentity.value.id;
+    final rows = await _loadFriendshipRows(selfId);
+    if (rows == null || _disposed) return;
+
+    final friendIds = <String>{};
+    final sentRequestIds = <String>{};
+    for (final row in rows) {
+      final userId = row['user_id']?.toString() ?? '';
+      final friendId = row['friend_id']?.toString() ?? '';
+      final status = row['status']?.toString() ?? 'accepted';
+      final peerId = _normalise(userId) == _normalise(selfId) ? friendId : userId;
+      if (peerId.isEmpty || _normalise(peerId) == _normalise(selfId)) continue;
+
+      if (status == 'pending' && _normalise(userId) == _normalise(selfId)) {
+        sentRequestIds.add(peerId);
+      } else if (status == 'accepted') {
+        friendIds.add(peerId);
+      }
+    }
+
+    final followingRows = await _loadFollowRows(selfId, following: true);
+    final followerRows = await _loadFollowRows(selfId, following: false);
+    final followingIds = followingRows == null
+        ? state.followingIds
+        : followingRows
+            .map((row) => row['following_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet();
+    final followersIds = followerRows == null
+        ? state.followersIds
+        : followerRows
+            .map((row) => row['follower_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet();
+
+    final allIds = <String>{
+      ...friendIds,
+      ...sentRequestIds,
+      ...followingIds,
+      ...followersIds,
+    }..remove(selfId);
+    final profiles = await _loadProfiles(allIds);
+
+    OllyUser resolve(String id) =>
+        profiles[_normalise(id)] ?? _localUserForId(id);
+
+    final friends = friendIds.map(resolve).toList();
+    for (final user in friends) {
+      _registerUser(user);
+    }
+
+    if (!_disposed) {
+      state = state.copyWith(
+        friends: friends,
+        followingIds: followingIds,
+        followersIds: followersIds,
+        sentRequestIds: sentRequestIds,
+      );
+    }
+  }
+
+  /// ID, kullanıcı adı veya isim ile arama yapar — önce local registry.
   List<OllyUser> searchUsers(String query) {
-    final clean = query.trim().toLowerCase();
+    final clean = _normalise(query);
     if (clean.isEmpty) return [];
 
-    final selfId = profileIdentity.value.id.toLowerCase();
-
+    final selfId = _normalise(profileIdentity.value.id);
     return allUsersRegistry.where((user) {
-      if (user.id.toLowerCase() == selfId) return false;
-      final matchId = user.id.toLowerCase().contains(clean);
-      final matchUsername = user.username.toLowerCase().contains(clean) ||
-          user.username.toLowerCase().replaceAll('@', '').contains(clean);
-      final matchName = user.name.toLowerCase().contains(clean);
+      if (_normalise(user.id) == selfId) return false;
+      final matchId = _normalise(user.id).contains(clean);
+      final matchUsername = _normalise(user.username).contains(clean) ||
+          _normalise(user.username).replaceAll('@', '').contains(
+                clean.replaceAll('@', ''),
+              );
+      final matchName = _normalise(user.name).contains(clean);
       return matchId || matchUsername || matchName;
     }).toList();
   }
 
-  /// Supabase profiles tablosundan kullanıcı arar ve local registry'e ekler
+  /// Supabase profiles tablosundan kullanıcı arar ve local registry'e ekler.
   Future<List<OllyUser>> searchUsersRemote(String query) async {
     final clean = query.trim();
     if (clean.isEmpty) return [];
 
-    if (!SupabaseService.instance.isInitialized) {
-      return searchUsers(clean);
-    }
+    if (!SupabaseService.instance.isInitialized) return searchUsers(clean);
 
     try {
       final selfId = profileIdentity.value.id;
-      final q = clean.startsWith('@') ? clean.substring(1) : clean;
+      final q = (clean.startsWith('@') ? clean.substring(1) : clean)
+          .replaceAll(RegExp(r'[%(),]'), '');
+      if (q.isEmpty) return [];
 
       final rows = await SupabaseService.instance.client
           .from('profiles')
-          .select('id, olly_id, username, name, bio, status_note, is_online, is_verified')
+          .select(
+              'id, olly_id, username, name, bio, status_note, location, is_online, is_verified, interests')
           .or('username.ilike.%$q%,name.ilike.%$q%,olly_id.ilike.%$q%')
           .neq('id', selfId)
           .limit(20);
 
-      final remoteUsers = (rows as List<dynamic>).map((r) {
-        final map = r as Map<String, dynamic>;
-        return OllyUser(
-          id: map['id'] as String? ?? map['olly_id'] as String? ?? '',
-          username: map['username'] as String? ?? '',
-          name: map['name'] as String? ?? '',
-          statusNote: map['status_note'] as String? ?? 'Çevrimiçi',
-          bio: map['bio'] as String?,
-          isOnline: map['is_online'] as bool? ?? false,
-          isVerified: map['is_verified'] as bool? ?? false,
-        );
-      }).where((u) => u.id.isNotEmpty).toList();
-
-      // Merge into local registry
-      for (final u in remoteUsers) {
-        if (!allUsersRegistry.any((r) => r.id == u.id)) {
-          allUsersRegistry.insert(0, u);
-        }
+      final remoteUsers = (rows as List<dynamic>)
+          .map((raw) => OllyUser.fromJson(Map<String, dynamic>.from(raw as Map)))
+          .where((user) => user.id.isNotEmpty)
+          .toList();
+      for (final user in remoteUsers) {
+        _registerUser(user);
       }
 
-      return remoteUsers;
+      return remoteUsers.isNotEmpty ? remoteUsers : searchUsers(clean);
     } catch (e) {
       debugPrint('[Social] remote search error: $e');
       return searchUsers(clean);
     }
   }
 
-  /// ID ile arkadaşlık isteği gönderir ve sekmeler arası canlı senkronize eder
-  bool sendFriendRequest(String queryOrId) {
+  /// Karşılıklı arkadaşlık kaydı oluşturur. Böylece iki cihazda da arkadaş
+  /// listesi, uygulama yeniden açıldığında Supabase'den yeniden kurulabilir.
+  Future<bool> sendFriendRequest(String queryOrId) async {
+    await _hydration;
     final user = findUserByIdOrAlias(queryOrId);
-    if (!allUsersRegistry.any((u) => u.id == user.id)) {
-      allUsersRegistry.insert(0, user);
-    }
     final self = profileIdentity.value;
+    if (_normalise(user.id) == _normalise(self.id)) return false;
+
+    if (SupabaseService.instance.isInitialized) {
+      try {
+        await SupabaseService.instance.client.from('friendships').upsert([
+          {
+            'user_id': self.id,
+            'friend_id': user.id,
+            'status': 'accepted',
+          },
+          {
+            'user_id': user.id,
+            'friend_id': self.id,
+            'status': 'accepted',
+          },
+        ], onConflict: 'user_id,friend_id');
+
+        await SupabaseService.instance.client.from('follows').upsert({
+          'follower_id': self.id,
+          'following_id': user.id,
+        }, onConflict: 'follower_id,following_id');
+      } catch (e) {
+        debugPrint('[Social] friend request write error: $e');
+        return false;
+      }
+    }
+
+    _registerUser(user);
+    final friends = List<OllyUser>.from(state.friends);
+    if (!friends.any((item) => _normalise(item.id) == _normalise(user.id))) {
+      friends.add(user);
+    }
+    state = state.copyWith(
+      friends: friends,
+      followingIds: {...state.followingIds, user.id},
+      sentRequestIds: state.sentRequestIds
+          .where((id) => _normalise(id) != _normalise(user.id))
+          .toSet(),
+    );
+
     final selfUser = OllyUser(
       id: self.id,
       username: self.username,
@@ -337,140 +572,137 @@ class SocialRelationshipsNotifier extends StateNotifier<SocialState> {
       statusNote: 'Çevrimiçi',
       isOnline: true,
     );
-
-    // İstek gönderildi olarak işaretle
-    final newSent = Set<String>.from(state.sentRequestIds)..add(user.id);
-    // Arkadaşlar listesine ekle ve takip et
-    final newFriends = List<OllyUser>.from(state.friends);
-    if (!newFriends.any((u) => u.id == user.id)) {
-      newFriends.add(user);
-    }
-    final newFollowing = Set<String>.from(state.followingIds)..add(user.id);
-
-    state = state.copyWith(
-      friends: newFriends,
-      followingIds: newFollowing,
-      sentRequestIds: newSent,
-    );
-
-    // Diğer sekmelere canlı anons et
     CrossTabSyncService.instance.emit({
       'type': 'FRIEND_ADDED',
       'targetId': user.id,
       'targetUsername': user.username,
       'fromUser': selfUser.toJson(),
     });
-
-    if (SupabaseService.instance.isInitialized) {
-      try {
-        SupabaseService.instance.client.from('friendships').upsert({
-          'user_id': self.id,
-          'friend_id': user.id,
-          'status': 'accepted',
-        });
-        SupabaseService.instance.client.from('follows').upsert({
-          'follower_id': self.id,
-          'following_id': user.id,
-        });
-      } catch (_) {}
-    }
-
     return true;
   }
 
-  /// Arkadaşı listeden çıkarır
-  void removeFriend(String userId) {
+  /// Arkadaşlığı iki yönde de kaldırır.
+  Future<bool> removeFriend(String userId) async {
+    await _hydration;
     final user = findUserByIdOrAlias(userId);
-    final newFriends = state.friends.where((u) => u.id != user.id).toList();
-    state = state.copyWith(friends: newFriends);
+    final selfId = profileIdentity.value.id;
 
     if (SupabaseService.instance.isInitialized) {
-      final selfId = profileIdentity.value.id;
       try {
-        SupabaseService.instance.client
+        await SupabaseService.instance.client
             .from('friendships')
             .delete()
-            .match({'user_id': selfId, 'friend_id': user.id});
-      } catch (_) {}
+            .or('and(user_id.eq.$selfId,friend_id.eq.${user.id}),and(user_id.eq.${user.id},friend_id.eq.$selfId)');
+      } catch (e) {
+        debugPrint('[Social] friend removal error: $e');
+        return false;
+      }
     }
+
+    state = state.copyWith(
+      friends: state.friends
+          .where((item) => _normalise(item.id) != _normalise(user.id))
+          .toList(),
+    );
+    CrossTabSyncService.instance.emit({
+      'type': 'FRIEND_REMOVED',
+      'targetId': user.id,
+      'fromId': selfId,
+    });
+    return true;
   }
 
-  /// Takip etme durumunu açıp kapatır
-  void toggleFollow(String queryOrId) {
+  /// Takip etme durumunu açıp kapatır.
+  Future<bool> toggleFollow(String queryOrId) async {
+    await _hydration;
     final user = findUserByIdOrAlias(queryOrId);
-    if (!allUsersRegistry.any((u) => u.id == user.id)) {
-      allUsersRegistry.insert(0, user);
-    }
-    final newFollowing = Set<String>.from(state.followingIds);
-    final isNowFollowing = !newFollowing.contains(user.id);
-    if (isNowFollowing) {
-      newFollowing.add(user.id);
-    } else {
-      newFollowing.remove(user.id);
-    }
-    state = state.copyWith(followingIds: newFollowing);
-
     final selfId = profileIdentity.value.id;
+    if (_normalise(user.id) == _normalise(selfId)) return false;
+
+    final following = Set<String>.from(state.followingIds);
+    final isNowFollowing = !following.contains(user.id);
+
+    if (SupabaseService.instance.isInitialized) {
+      try {
+        if (isNowFollowing) {
+          await SupabaseService.instance.client.from('follows').upsert({
+            'follower_id': selfId,
+            'following_id': user.id,
+          }, onConflict: 'follower_id,following_id');
+        } else {
+          await SupabaseService.instance.client
+              .from('follows')
+              .delete()
+              .match({'follower_id': selfId, 'following_id': user.id});
+        }
+      } catch (e) {
+        debugPrint('[Social] follow write error: $e');
+        return false;
+      }
+    }
+
     if (isNowFollowing) {
+      following.add(user.id);
       CrossTabSyncService.instance.emit({
         'type': 'FOLLOW_USER',
         'targetId': user.id,
         'fromId': selfId,
       });
-      if (SupabaseService.instance.isInitialized) {
-        try {
-          SupabaseService.instance.client.from('follows').upsert({
-            'follower_id': selfId,
-            'following_id': user.id,
-          });
-        } catch (_) {}
-      }
     } else {
-      if (SupabaseService.instance.isInitialized) {
-        try {
-          SupabaseService.instance.client
-              .from('follows')
-              .delete()
-              .match({'follower_id': selfId, 'following_id': user.id});
-        } catch (_) {}
-      }
+      following.remove(user.id);
+      CrossTabSyncService.instance.emit({
+        'type': 'UNFOLLOW_USER',
+        'targetId': user.id,
+        'fromId': selfId,
+      });
     }
+    state = state.copyWith(followingIds: following);
+    _registerUser(user);
+    return true;
   }
 
-  /// Kullanıcı arkadaş mı?
   bool isFriend(String queryOrId) {
     final user = findUserByIdOrAlias(queryOrId);
-    return state.friends.any((u) => u.id == user.id);
+    return state.friends.any((item) => _normalise(item.id) == _normalise(user.id));
   }
 
-  /// Kullanıcı takip ediliyor mu?
   bool isFollowing(String queryOrId) {
     final user = findUserByIdOrAlias(queryOrId);
-    return state.followingIds.contains(user.id);
+    return state.followingIds
+        .any((id) => _normalise(id) == _normalise(user.id));
   }
 
-  /// Arkadaşlık isteği gönderildi mi?
   bool hasSentRequest(String queryOrId) {
     final user = findUserByIdOrAlias(queryOrId);
-    return state.sentRequestIds.contains(user.id);
+    return state.sentRequestIds
+        .any((id) => _normalise(id) == _normalise(user.id));
   }
 
-  /// Takip edilen kullanıcıların listesini döner
   List<OllyUser> getFollowingUsers() {
     return allUsersRegistry
-        .where((u) => state.followingIds.contains(u.id))
+        .where((user) => isFollowing(user.id))
         .toList();
   }
 
-  /// Takipçilerin listesini döner
   List<OllyUser> getFollowersUsers() {
     return allUsersRegistry
-        .where((u) => state.followersIds.contains(u.id))
+        .where((user) => state.followersIds
+            .any((id) => _normalise(id) == _normalise(user.id)))
         .toList();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _remotePollTimer?.cancel();
+    _crossTabSubscription?.cancel();
+    if (_remoteChannel != null && SupabaseService.instance.isInitialized) {
+      SupabaseService.instance.client.removeChannel(_remoteChannel!);
+    }
+    super.dispose();
   }
 }
 
-/// Global Riverpod Provider
 final socialRelationshipsProvider =
     StateNotifierProvider<SocialRelationshipsNotifier, SocialState>((ref) {
   return SocialRelationshipsNotifier();

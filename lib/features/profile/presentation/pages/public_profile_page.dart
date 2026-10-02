@@ -187,13 +187,18 @@ class PublicProfilePage extends ConsumerWidget {
                                           backgroundColor: colors.primary,
                                           foregroundColor: Colors.white,
                                         ),
-                                  onPressed: () {
-                                    socialNotifier.toggleFollow(user.id);
+                                  onPressed: () async {
+                                    final wasFollowing = isFollowing;
+                                    final ok = await socialNotifier
+                                        .toggleFollow(user.id);
+                                    if (!context.mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
-                                        content: Text(isFollowing
-                                            ? '${user.name} takipten çıkarıldı'
-                                            : '${user.name} takip edildi'),
+                                        content: Text(ok
+                                            ? (wasFollowing
+                                                ? '${user.name} takipten çıkarıldı'
+                                                : '${user.name} takip edildi')
+                                            : 'Takip işlemi tamamlanamadı'),
                                         behavior: SnackBarBehavior.floating,
                                       ),
                                     );
@@ -213,12 +218,15 @@ class PublicProfilePage extends ConsumerWidget {
                               // Arkadaş Ekle / Arkadaşsınız Butonu
                               if (!isFriend)
                                 OutlinedButton.icon(
-                                  onPressed: () {
-                                    socialNotifier.sendFriendRequest(user.id);
+                                  onPressed: () async {
+                                    final ok = await socialNotifier
+                                        .sendFriendRequest(user.id);
+                                    if (!context.mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       SnackBar(
-                                        content: Text(
-                                            '${user.name} arkadaş olarak eklendi!'),
+                                        content: Text(ok
+                                            ? '${user.name} arkadaş olarak eklendi!'
+                                            : 'Arkadaş ekleme başarısız oldu'),
                                         behavior: SnackBarBehavior.floating,
                                       ),
                                     );

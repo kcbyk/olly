@@ -22,6 +22,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
   String _searchQuery = '';
   List<OllyUser> _remoteResults = [];
   bool _isSearching = false;
+  int _searchGeneration = 0;
 
   @override
   void dispose() {
@@ -31,6 +32,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
 
   Future<void> _onSearch(String val) async {
     final q = val.trim();
+    final generation = ++_searchGeneration;
     setState(() {
       _searchQuery = q;
       _isSearching = q.isNotEmpty;
@@ -41,7 +43,7 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
     }
     final notifier = ref.read(socialRelationshipsProvider.notifier);
     final results = await notifier.searchUsersRemote(q);
-    if (mounted) {
+    if (mounted && generation == _searchGeneration) {
       setState(() {
         _remoteResults = results;
         _isSearching = false;
@@ -375,13 +377,15 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                               const Gap(10),
                               if (isFollowing || isFriend)
                                 GestureDetector(
-                                  onTap: () {
-                                    socialNotifier.toggleFollow(user.id);
+                                  onTap: () async {
+                                    final ok = await socialNotifier.toggleFollow(user.id);
+                                    if (!context.mounted) return;
                                     ScaffoldMessenger.of(context)
                                         .showSnackBar(
                                       SnackBar(
-                                        content: Text(
-                                            '${user.name} takipten çıkarıldı'),
+                                        content: Text(ok
+                                            ? '${user.name} takipten çıkarıldı'
+                                            : 'Takip işlemi tamamlanamadı'),
                                         behavior: SnackBarBehavior.floating,
                                       ),
                                     );
@@ -436,14 +440,16 @@ class _AddFriendPageState extends ConsumerState<AddFriendPage> {
                                 )
                               else
                                 GestureDetector(
-                                  onTap: () {
-                                    socialNotifier
+                                  onTap: () async {
+                                    final ok = await socialNotifier
                                         .sendFriendRequest(user.id);
+                                    if (!context.mounted) return;
                                     ScaffoldMessenger.of(context)
                                         .showSnackBar(
                                       SnackBar(
-                                        content: Text(
-                                            '${user.name} arkadaşlara eklendi!'),
+                                        content: Text(ok
+                                            ? '${user.name} arkadaşlara eklendi!'
+                                            : 'Arkadaş ekleme başarısız oldu'),
                                         behavior: SnackBarBehavior.floating,
                                       ),
                                     );

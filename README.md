@@ -36,12 +36,14 @@ flutter pub get
 dart run build_runner build --delete-conflicting-outputs
 ```
 
-### 3. Firebase kurulumu
-- [Firebase Console](https://console.firebase.google.com) üzerinden yeni proje oluştur
-- FlutterFire CLI ile yapılandır:
+### 3. Supabase kurulumu
+- Supabase Dashboard -> SQL Editor bölümünde `supabase_schema.sql` dosyasını bir kez çalıştırın.
+- Yerel ayarlar için `.env.example` dosyasını `.env` olarak kopyalayın.
+- Flutter istemcisinde yalnızca `SUPABASE_PUBLISHABLE_KEY` kullanılır. `sb_secret` / service-role anahtarını kesinlikle mobil uygulamaya koymayın.
+
 ```bash
-dart pub global activate flutterfire_cli
-flutterfire configure
+cp .env.example .env
+flutter pub get
 ```
 
 ### 4. LiveKit kurulumu
@@ -65,7 +67,7 @@ flutter run
 | State Management | Riverpod 2.x |
 | Navigation | go_router |
 | Models | Freezed + json_serializable |
-| Backend | Firebase (Auth, Firestore, Storage, FCM) |
+| Backend | Supabase (Postgres, Realtime, RLS) |
 | Voice Rooms | LiveKit Flutter SDK |
 | Local DB | Drift (SQLite) |
 | UI Animations | flutter_animate |

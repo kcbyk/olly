@@ -65,8 +65,35 @@ Future<void> loadProfileIdentity() async {
       username: username,
       about: about,
     );
+
+    // A profile must exist remotely before another device can find this user
+    // or resolve their name in a message/friend event.
+    await syncProfileIdentity();
   } catch (e) {
     debugPrint('[Profile] load error: $e');
+  }
+}
+
+/// Keeps the current local identity discoverable in Supabase.
+///
+/// This is intentionally separate from `saveProfileIdentity` so an existing
+/// installation also gets repaired on the next launch.
+Future<void> syncProfileIdentity() async {
+  if (!profileSetupDone || !SupabaseService.instance.isInitialized) return;
+
+  final identity = profileIdentity.value;
+  try {
+    await SupabaseService.instance.client.from('profiles').upsert({
+      'id': identity.id,
+      'olly_id': identity.id,
+      'username': identity.username,
+      'name': identity.name,
+      'bio': identity.about,
+      'status_note': 'Çevrimiçi',
+      'is_online': true,
+    });
+  } catch (e) {
+    debugPrint('[Profile] remote profile sync error: $e');
   }
 }
 

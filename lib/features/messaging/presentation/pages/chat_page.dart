@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gap/gap.dart';
@@ -29,6 +29,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   late List<_ChatMessage> _messages;
   StreamSubscription? _syncSub;
   RealtimeChannel? _supabaseChannel;
+  Timer? _pollTimer;
 
   @override
   void initState() {
@@ -42,31 +43,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       }
     });
 
-    // Supabase mesajlarını çek ve dinle
+    // Supabase mesajlarını çek, Realtime ile dinle ve publication ayarı
+    // eksikse polling ile yine de diğer cihazdaki mesajı yakala.
     if (SupabaseService.instance.isInitialized) {
       final selfId = profileIdentity.value.id;
       final peerId = _conversation.id;
-      SupabaseService.instance.client
-          .from('messages')
-          .select()
-          .or('and(sender_id.eq.$selfId,receiver_id.eq.$peerId),and(sender_id.eq.$peerId,receiver_id.eq.$selfId)')
-          .order('created_at', ascending: true)
-          .then((rows) {
-        if (!mounted || rows.isEmpty) return;
-        final history = rows.map((r) {
-          final isMe = r['sender_id'] == selfId;
-          final created = DateTime.tryParse(r['created_at']?.toString() ?? '') ?? DateTime.now();
-          final timeStr = '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-          return _ChatMessage(
-            text: r['content']?.toString() ?? '',
-            isMine: isMe,
-            time: timeStr,
-          );
-        }).toList();
-        setState(() {
-          _messages = history;
-        });
-      }).catchError((_) {});
+      unawaited(_loadHistory());
 
       _supabaseChannel = SupabaseService.instance.client
           .channel('chat_${selfId}_$peerId')
@@ -74,90 +56,151 @@ class _ChatPageState extends ConsumerState<ChatPage> {
             event: PostgresChangeEvent.insert,
             schema: 'public',
             table: 'messages',
-            callback: (payload) {
-              if (!mounted) return;
-              final r = payload.newRecord;
-              final rSender = r['sender_id'] as String? ?? '';
-              final rReceiver = r['receiver_id'] as String? ?? '';
-              // Sadece bu konuşmaya ait mesajları işle
-              if (!((rSender == peerId && rReceiver == selfId) ||
-                  (rSender == selfId && rReceiver == peerId))) return;
-              final isMe = rSender == selfId;
-              final created = DateTime.tryParse(
-                      r['created_at']?.toString() ?? '') ??
-                  DateTime.now();
-              final timeStr =
-                  '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-              setState(() {
-                // Optimistic duplicate'i önle
-                final text = r['content']?.toString() ?? '';
-                final alreadyExists = _messages.any(
-                    (m) => m.text == text && m.isMine == isMe && m.isOptimistic);
-                if (alreadyExists && isMe) {
-                  // Optimistic mesajı gerçeğiyle değiştir
-                  final idx = _messages.lastIndexWhere(
-                      (m) => m.text == text && m.isMine && m.isOptimistic);
-                  if (idx >= 0) {
-                    _messages[idx] = _ChatMessage(
-                      text: text,
-                      isMine: true,
-                      time: timeStr,
-                    );
-                  }
-                } else if (!isMe) {
-                  _messages.add(_ChatMessage(
-                    text: text,
-                    isMine: false,
-                    time: timeStr,
-                  ));
-                }
-              });
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (_scrollController.hasClients) {
-                  _scrollController.animateTo(
-                    _scrollController.position.maxScrollExtent,
-                    duration: const Duration(milliseconds: 260),
-                    curve: Curves.easeOutCubic,
-                  );
-                }
-              });
-            },
+            callback: (payload) =>
+                _handleDatabaseMessage(payload.newRecord, selfId, peerId),
           )
-          .subscribe();
+        ..subscribe();
+      _pollTimer = Timer.periodic(
+        const Duration(seconds: 6),
+        (_) => unawaited(_loadHistory()),
+      );
     }
 
     // Diğer tarayıcı sekmelerinden gelen anlık mesajları dinle
     _syncSub = CrossTabSyncService.instance.stream.listen((event) {
-      if (event['type'] == 'CHAT_MESSAGE') {
-        final self = profileIdentity.value;
-        final toId = (event['toId'] as String?)?.toLowerCase();
-        final fromId = (event['fromId'] as String?)?.toLowerCase();
-        final currentConvId = _conversation.id.toLowerCase();
-        final myId = self.id.toLowerCase();
+      if (event['type'] != 'CHAT_MESSAGE') return;
+      final self = profileIdentity.value;
+      final toId = (event['toId'] as String?)?.toLowerCase();
+      final fromId = (event['fromId'] as String?)?.toLowerCase();
+      final currentConvId = _conversation.id.toLowerCase();
+      final myId = self.id.toLowerCase();
 
-        if (toId == myId &&
-            (fromId == currentConvId ||
-                event['fromName'] == _conversation.name)) {
-          if (mounted) {
-            setState(() {
-              _messages.add(_ChatMessage(
-                text: event['text'] as String? ?? '',
-                isMine: false,
-                time: event['time'] as String? ?? 'Şimdi',
-              ));
-            });
-            ref.read(conversationsProvider.notifier).markAsRead(_conversation.id);
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (_scrollController.hasClients) {
-                _scrollController.animateTo(
-                  _scrollController.position.maxScrollExtent,
-                  duration: const Duration(milliseconds: 260),
-                  curve: Curves.easeOutCubic,
-                );
-              }
-            });
-          }
-        }
+      if (toId != myId ||
+          (fromId != currentConvId && event['fromName'] != _conversation.name)) {
+        return;
+      }
+
+      final messageId = event['messageId'] as String?;
+      if (messageId != null &&
+          _messages.any((message) => message.id == messageId)) {
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _messages.add(_ChatMessage(
+            id: messageId,
+            text: event['text'] as String? ?? '',
+            isMine: false,
+            time: event['time'] as String? ?? 'Şimdi',
+          ));
+        });
+        ref.read(conversationsProvider.notifier).markAsRead(_conversation.id);
+        _scrollToBottom();
+      }
+    });
+  }
+
+  Future<void> _loadHistory() async {
+    if (!mounted || !SupabaseService.instance.isInitialized) return;
+    final selfId = profileIdentity.value.id;
+    final peerId = _conversation.id;
+    try {
+      final rawRows = await SupabaseService.instance.client
+          .from('messages')
+          .select('id, sender_id, receiver_id, content, created_at')
+          .or('and(sender_id.eq.$selfId,receiver_id.eq.$peerId),and(sender_id.eq.$peerId,receiver_id.eq.$selfId)')
+          .order('created_at', ascending: true);
+      final history = (rawRows as List<dynamic>).map((raw) {
+        final row = Map<String, dynamic>.from(raw as Map);
+        final created = DateTime.tryParse(row['created_at']?.toString() ?? '') ??
+            DateTime.now();
+        final isMe = row['sender_id']?.toString() == selfId;
+        return _ChatMessage(
+          id: row['id']?.toString(),
+          text: row['content']?.toString() ?? '',
+          isMine: isMe,
+          time:
+              '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}',
+        );
+      }).toList();
+      if (!mounted || history.isEmpty) return;
+
+      // A send can happen while the initial query is in flight. Preserve any
+      // optimistic bubbles that are not in the query response yet.
+      final next = <_ChatMessage>[...history];
+      for (final optimistic in _messages.where((message) => message.isOptimistic)) {
+        final exists = next.any((message) =>
+            (optimistic.id != null && message.id == optimistic.id) ||
+            (message.text == optimistic.text && message.isMine == optimistic.isMine));
+        if (!exists) next.add(optimistic);
+      }
+      setState(() => _messages = next);
+      _scrollToBottom(animated: false);
+    } catch (_) {
+      // Local/cross-tab messaging remains available when the API is offline.
+    }
+  }
+
+  void _handleDatabaseMessage(
+    Map<String, dynamic> row,
+    String selfId,
+    String peerId,
+  ) {
+    if (!mounted) return;
+    final senderId = row['sender_id']?.toString() ?? '';
+    final receiverId = row['receiver_id']?.toString() ?? '';
+    if (!((senderId == peerId && receiverId == selfId) ||
+        (senderId == selfId && receiverId == peerId))) {
+      return;
+    }
+
+    final id = row['id']?.toString();
+    final text = row['content']?.toString() ?? '';
+    final isMine = senderId == selfId;
+    final created = DateTime.tryParse(row['created_at']?.toString() ?? '') ??
+        DateTime.now();
+    final time =
+        '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
+
+    final exactIndex = id == null
+        ? -1
+        : _messages.indexWhere((message) => message.id == id);
+    if (exactIndex >= 0 && !_messages[exactIndex].isOptimistic) return;
+
+    final optimisticIndex = _messages.lastIndexWhere((message) =>
+        message.isOptimistic && message.isMine == isMine && message.text == text);
+    setState(() {
+      if (optimisticIndex >= 0) {
+        _messages[optimisticIndex] = _ChatMessage(
+          id: id,
+          text: text,
+          isMine: isMine,
+          time: time,
+        );
+      } else if (exactIndex < 0) {
+        _messages.add(_ChatMessage(
+          id: id,
+          text: text,
+          isMine: isMine,
+          time: time,
+        ));
+      }
+    });
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom({bool animated = true}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final target = _scrollController.position.maxScrollExtent;
+      if (!animated) {
+        _scrollController.jumpTo(target);
+      } else {
+        _scrollController.animateTo(
+          target,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+        );
       }
     });
   }
@@ -180,8 +223,9 @@ class _ChatPageState extends ConsumerState<ChatPage> {
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _syncSub?.cancel();
-    if (_supabaseChannel != null) {
+    if (_supabaseChannel != null && SupabaseService.instance.isInitialized) {
       SupabaseService.instance.client.removeChannel(_supabaseChannel!);
     }
     _controller.dispose();
@@ -189,39 +233,28 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     super.dispose();
   }
 
-  void _send() {
+  void _send() => unawaited(_sendMessage());
+
+  Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     final self = profileIdentity.value;
     final timeStr = TimeOfDay.now().format(context);
+    final hasBackend = SupabaseService.instance.isInitialized;
 
-    // Supabase aktifse stream zaten mesajı getirecek — sadece local ekle
-    // Supabase yoksa direkt listeye ekle
-    final addLocally = !SupabaseService.instance.isInitialized;
-
-    if (addLocally) {
-      setState(() {
-        _messages.add(_ChatMessage(
-          text: text,
-          isMine: true,
-          time: timeStr,
-        ));
-      });
-    } else {
-      // Supabase stream güncellemeyi sağlar, ama optimistic UI için ekle
-      // ve stream gelince duplicate'i önlemek için flag kullan
-      setState(() {
-        _messages.add(_ChatMessage(
-          text: text,
-          isMine: true,
-          time: timeStr,
-          isOptimistic: true,
-        ));
-      });
-    }
-
+    if (!mounted) return;
+    setState(() {
+      _messages.add(_ChatMessage(
+        text: text,
+        isMine: true,
+        time: timeStr,
+        // With a backend this bubble is replaced by the row returned from
+        // Supabase. Without one it is already the durable local message.
+        isOptimistic: hasBackend,
+      ));
+      _canSend = false;
+    });
     _controller.clear();
-    setState(() => _canSend = false);
 
     ref.read(conversationsProvider.notifier).recordOutgoingMessage(
           peerId: _conversation.id,
@@ -229,35 +262,62 @@ class _ChatPageState extends ConsumerState<ChatPage> {
           text: text,
           time: timeStr,
         );
+    _scrollToBottom();
 
-    // Supabase kaydı
-    if (SupabaseService.instance.isInitialized) {
+    String? messageId;
+    if (hasBackend) {
       try {
-        SupabaseService.instance.client.from('messages').insert({
-          'sender_id': self.id,
-          'receiver_id': _conversation.id,
-          'content': text,
-        });
-      } catch (_) {}
+        final inserted = await SupabaseService.instance.client
+            .from('messages')
+            .insert({
+              'sender_id': self.id,
+              'receiver_id': _conversation.id,
+              'content': text,
+            })
+            .select('id, sender_id, receiver_id, content, created_at')
+            .single();
+        final row = Map<String, dynamic>.from(inserted as Map);
+        messageId = row['id']?.toString();
+        if (mounted) _handleDatabaseMessage(row, self.id, _conversation.id);
+        ref.read(conversationsProvider.notifier).recordOutgoingMessage(
+              peerId: _conversation.id,
+              peerName: _conversation.name,
+              text: text,
+              time: timeStr,
+              messageId: messageId,
+            );
+      } catch (e) {
+        if (mounted) {
+          final index = _messages.lastIndexWhere(
+            (message) =>
+                message.isOptimistic &&
+                message.isMine &&
+                message.text == text,
+          );
+          if (index >= 0) {
+            setState(() => _messages.removeAt(index));
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Mesaj gönderilemedi. İnternet bağlantını kontrol et.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
     }
 
-    // Diğer sekmelere anlık yayınla
+    // Aynı origin'deki diğer sekmeler için hızlı yol. Farklı cihazlar mesajı
+    // Supabase insert + Realtime/polling üzerinden alır.
     CrossTabSyncService.instance.emit({
       'type': 'CHAT_MESSAGE',
+      'messageId': messageId,
       'fromId': self.id,
       'fromName': self.name,
       'toId': _conversation.id,
       'text': text,
       'time': timeStr,
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeOutCubic,
-        );
-      }
     });
   }
 
@@ -810,6 +870,7 @@ class _ChatMessage {
     required this.text,
     required this.isMine,
     required this.time,
+    this.id,
     this.read = false,
     this.invite = false,
     this.audio = false,
@@ -817,6 +878,7 @@ class _ChatMessage {
   });
 
   final String text;
+  final String? id;
   final bool isMine;
   final String time;
   final bool read;

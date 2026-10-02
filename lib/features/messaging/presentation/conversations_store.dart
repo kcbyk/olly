@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -6,7 +8,7 @@ import '../../../core/sync/cross_tab_sync.dart';
 import '../../friends/presentation/social_relationships_store.dart';
 import '../../profile/presentation/profile_identity_store.dart';
 
-/// Konuşma modeli
+/// Konuşma modeli.
 class ModernConversation {
   const ModernConversation({
     required this.id,
@@ -16,6 +18,7 @@ class ModernConversation {
     required this.unread,
     required this.isOnline,
     this.isVoiceMessage = false,
+    this.lastMessageId,
   });
 
   final String id;
@@ -25,6 +28,7 @@ class ModernConversation {
   final int unread;
   final bool isOnline;
   final bool isVoiceMessage;
+  final String? lastMessageId;
 
   ModernConversation copyWith({
     String? id,
@@ -34,6 +38,7 @@ class ModernConversation {
     int? unread,
     bool? isOnline,
     bool? isVoiceMessage,
+    String? lastMessageId,
   }) {
     return ModernConversation(
       id: id ?? this.id,
@@ -43,11 +48,11 @@ class ModernConversation {
       unread: unread ?? this.unread,
       isOnline: isOnline ?? this.isOnline,
       isVoiceMessage: isVoiceMessage ?? this.isVoiceMessage,
+      lastMessageId: lastMessageId ?? this.lastMessageId,
     );
   }
 }
 
-/// Sabitlenmiş kullanıcı modeli
 class PinnedUser {
   const PinnedUser({
     required this.id,
@@ -62,7 +67,6 @@ class PinnedUser {
   final bool hasUnread;
 }
 
-/// Konuşmalar State Modeli
 class ConversationsState {
   const ConversationsState({
     required this.conversations,
@@ -83,7 +87,7 @@ class ConversationsState {
   }
 }
 
-/// Konuşmalar Riverpod StateNotifier
+/// Mesaj özetlerini yerel state + Supabase Realtime/polling ile güncel tutar.
 class ConversationsNotifier extends StateNotifier<ConversationsState> {
   ConversationsNotifier()
       : super(const ConversationsState(
@@ -91,90 +95,257 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           pinned: [],
         )) {
     _initCrossTabSync();
+    _initSupabaseSync();
+    unawaited(_loadRemoteConversations());
+  }
+
+  RealtimeChannel? _supabaseChannel;
+  StreamSubscription<Map<String, dynamic>>? _crossTabSubscription;
+  Timer? _pollTimer;
+  bool _remoteLoadInFlight = false;
+  bool _disposed = false;
+
+  String _formatTime(dynamic raw) {
+    final created = DateTime.tryParse(raw?.toString() ?? '') ?? DateTime.now();
+    return '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
   }
 
   void _initCrossTabSync() {
-    // CrossTab: aynı cihaz farklı sekmelerde çalışır
-    CrossTabSyncService.instance.stream.listen((event) {
-      final type = event['type'] as String?;
-      if (type == 'CHAT_MESSAGE') {
-        final self = profileIdentity.value;
-        final toId = (event['toId'] as String?)?.toLowerCase();
-        final fromId = event['fromId'] as String? ?? '';
-        final fromName = event['fromName'] as String? ?? 'Kullanıcı $fromId';
-        final text = event['text'] as String? ?? '';
-        final time = event['time'] as String? ?? 'Şimdi';
+    _crossTabSubscription = CrossTabSyncService.instance.stream.listen((event) {
+      if (event['type'] != 'CHAT_MESSAGE') return;
 
-        if (toId != null &&
-            (toId == self.id.toLowerCase() ||
-                toId == self.username.toLowerCase())) {
-          final user = findUserByIdOrAlias(fromId);
-          recordIncomingMessage(
-            peerId: user.id,
-            peerName: user.name.isNotEmpty && user.name != user.id
-                ? user.name
-                : fromName,
-            text: text,
-            time: time,
+      final self = profileIdentity.value;
+      final toId = (event['toId'] as String?)?.toLowerCase();
+      final fromId = event['fromId'] as String? ?? '';
+      if (toId == null ||
+          (toId != self.id.toLowerCase() &&
+              toId != self.username.toLowerCase())) {
+        return;
+      }
+
+      final fromName = event['fromName'] as String? ?? 'Kullanıcı $fromId';
+      final text = event['text'] as String? ?? '';
+      final time = event['time'] as String? ?? 'Şimdi';
+      recordIncomingMessage(
+        peerId: fromId,
+        peerName: fromName,
+        text: text,
+        time: time,
+        messageId: event['messageId'] as String?,
+      );
+    });
+  }
+
+  void _initSupabaseSync() {
+    if (!SupabaseService.instance.isInitialized) return;
+
+    final selfId = profileIdentity.value.id;
+    _supabaseChannel = SupabaseService.instance.client
+        .channel('messages_incoming_$selfId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'receiver_id',
+            value: selfId,
+          ),
+          callback: (payload) => unawaited(_handleIncomingRow(payload.newRecord)),
+        )
+      ..subscribe();
+
+    // Realtime is the fast path. Polling is a small safety net for projects
+    // where the table was created before realtime publication was enabled.
+    _pollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => unawaited(_loadRemoteConversations()),
+    );
+  }
+
+  Future<OllyUser> _resolveUser(String id) async {
+    for (final user in allUsersRegistry) {
+      if (user.id.toLowerCase() == id.toLowerCase()) return user;
+    }
+
+    if (SupabaseService.instance.isInitialized) {
+      try {
+        final rows = await SupabaseService.instance.client
+            .from('profiles')
+            .select(
+                'id, olly_id, username, name, bio, status_note, location, is_online, is_verified, interests')
+            .eq('id', id)
+            .limit(1);
+        if ((rows as List<dynamic>).isNotEmpty) {
+          final user = OllyUser.fromJson(
+            Map<String, dynamic>.from(rows.first as Map),
           );
+          final oldIndex = allUsersRegistry.indexWhere(
+            (item) => item.id.toLowerCase() == user.id.toLowerCase(),
+          );
+          if (oldIndex >= 0) {
+            allUsersRegistry[oldIndex] = user;
+          } else {
+            allUsersRegistry.insert(0, user);
+          }
+          return user;
+        }
+      } catch (_) {
+        // The fallback below still lets the message render.
+      }
+    }
+    return findUserByIdOrAlias(id);
+  }
+
+  Future<Map<String, OllyUser>> _resolveUsers(Set<String> ids) async {
+    final resolved = <String, OllyUser>{};
+    final unresolved = <String>{};
+    for (final id in ids) {
+      final local = allUsersRegistry.where(
+        (user) => user.id.toLowerCase() == id.toLowerCase(),
+      );
+      if (local.isNotEmpty) {
+        resolved[id.toLowerCase()] = local.first;
+      } else {
+        unresolved.add(id);
+      }
+    }
+
+    if (unresolved.isNotEmpty && SupabaseService.instance.isInitialized) {
+      try {
+        final rows = await SupabaseService.instance.client
+            .from('profiles')
+            .select(
+                'id, olly_id, username, name, bio, status_note, location, is_online, is_verified, interests')
+            .inFilter('id', unresolved.toList());
+        for (final raw in rows as List<dynamic>) {
+          final user = OllyUser.fromJson(Map<String, dynamic>.from(raw as Map));
+          resolved[user.id.toLowerCase()] = user;
+          final oldIndex = allUsersRegistry.indexWhere(
+            (item) => item.id.toLowerCase() == user.id.toLowerCase(),
+          );
+          if (oldIndex >= 0) {
+            allUsersRegistry[oldIndex] = user;
+          } else {
+            allUsersRegistry.insert(0, user);
+          }
+        }
+      } catch (_) {
+        // Resolve missing IDs one by one through the local fallback below.
+      }
+    }
+
+    for (final id in ids) {
+      resolved.putIfAbsent(id.toLowerCase(), () => findUserByIdOrAlias(id));
+    }
+    return resolved;
+  }
+
+  Future<void> _loadRemoteConversations() async {
+    if (_disposed ||
+        !SupabaseService.instance.isInitialized ||
+        _remoteLoadInFlight) {
+      return;
+    }
+    _remoteLoadInFlight = true;
+    try {
+      final selfId = profileIdentity.value.id;
+      final rawRows = await SupabaseService.instance.client
+          .from('messages')
+          .select('id, sender_id, receiver_id, content, is_read, created_at')
+          .or('sender_id.eq.$selfId,receiver_id.eq.$selfId')
+          .order('created_at', ascending: false);
+      final rows = (rawRows as List<dynamic>)
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+      if (rows.isEmpty || _disposed) return;
+
+      final latestByPeer = <String, Map<String, dynamic>>{};
+      final unreadByPeer = <String, int>{};
+      final peerIds = <String>{};
+      for (final row in rows) {
+        final senderId = row['sender_id']?.toString() ?? '';
+        final receiverId = row['receiver_id']?.toString() ?? '';
+        final peerId = senderId.toLowerCase() == selfId.toLowerCase()
+            ? receiverId
+            : senderId;
+        if (peerId.isEmpty) continue;
+        peerIds.add(peerId);
+        latestByPeer.putIfAbsent(peerId.toLowerCase(), () => row);
+        if (receiverId.toLowerCase() == selfId.toLowerCase() &&
+            row['is_read'] != true) {
+          unreadByPeer[peerId.toLowerCase()] =
+              (unreadByPeer[peerId.toLowerCase()] ?? 0) + 1;
         }
       }
-    });
 
-    // Supabase Realtime: farklı cihazlar arası gerçek zamanlı mesajlar
-    if (SupabaseService.instance.isInitialized) {
-      final selfId = profileIdentity.value.id;
-      // Realtime channel — INSERT eventlerini dinle
-      SupabaseService.instance.client
-          .channel('messages_incoming_$selfId')
-          .onPostgresChanges(
-            event: PostgresChangeEvent.insert,
-            schema: 'public',
-            table: 'messages',
-            filter: PostgresChangeFilter(
-              type: PostgresChangeFilterType.eq,
-              column: 'receiver_id',
-              value: selfId,
-            ),
-            callback: (payload) {
-              final r = payload.newRecord;
-              final senderId = r['sender_id'] as String? ?? '';
-              if (senderId == selfId) return;
-              final content = r['content'] as String? ?? '';
-              final created = DateTime.tryParse(
-                      r['created_at']?.toString() ?? '') ??
-                  DateTime.now();
-              final timeStr =
-                  '${created.hour.toString().padLeft(2, '0')}:${created.minute.toString().padLeft(2, '0')}';
-              final sender = findUserByIdOrAlias(senderId);
-              recordIncomingMessage(
-                peerId: senderId,
-                peerName: sender.name.isNotEmpty && sender.name != senderId
-                    ? sender.name
-                    : senderId,
-                text: content,
-                time: timeStr,
-              );
-            },
-          )
-          .subscribe();
+      final users = await _resolveUsers(peerIds);
+      final loaded = <ModernConversation>[];
+      for (final peerId in peerIds) {
+        final row = latestByPeer[peerId.toLowerCase()];
+        if (row == null) continue;
+        final user = users[peerId.toLowerCase()] ?? findUserByIdOrAlias(peerId);
+        loaded.add(ModernConversation(
+          id: peerId,
+          name: user.name.isNotEmpty ? user.name : peerId,
+          lastMessage: row['content']?.toString() ?? '',
+          time: _formatTime(row['created_at']),
+          unread: unreadByPeer[peerId.toLowerCase()] ?? 0,
+          isOnline: user.isOnline,
+          lastMessageId: row['id']?.toString(),
+        ));
+      }
+
+      // Keep an optimistic conversation until its insert becomes queryable.
+      final loadedIds = loaded.map((item) => item.id.toLowerCase()).toSet();
+      final optimistic = state.conversations.where(
+        (item) => !loadedIds.contains(item.id.toLowerCase()),
+      );
+      if (!_disposed) {
+        state = state.copyWith(conversations: [...loaded, ...optimistic]);
+      }
+    } catch (e) {
+      // The UI remains usable in local/cross-tab mode.
+      // Do not surface a transient polling error to the user.
+    } finally {
+      _remoteLoadInFlight = false;
     }
   }
 
-  /// Gelen mesajı listenin en başına ekler/günceller ve okunmamış sayısını artırır
+  Future<void> _handleIncomingRow(Map<String, dynamic> row) async {
+    if (_disposed) return;
+    final selfId = profileIdentity.value.id;
+    final senderId = row['sender_id']?.toString() ?? '';
+    if (senderId.isEmpty || senderId.toLowerCase() == selfId.toLowerCase()) {
+      return;
+    }
+    final user = await _resolveUser(senderId);
+    if (_disposed) return;
+    recordIncomingMessage(
+      peerId: senderId,
+      peerName: user.name.isNotEmpty ? user.name : senderId,
+      text: row['content']?.toString() ?? '',
+      time: _formatTime(row['created_at']),
+      messageId: row['id']?.toString(),
+    );
+  }
+
   void recordIncomingMessage({
     required String peerId,
     required String peerName,
     required String text,
     required String time,
+    String? messageId,
   }) {
     final list = List<ModernConversation>.from(state.conversations);
-    final idx = list.indexWhere((c) =>
-        c.id.toLowerCase() == peerId.toLowerCase() ||
-        c.name.toLowerCase() == peerName.toLowerCase());
+    final idx = list.indexWhere((conversation) =>
+        conversation.id.toLowerCase() == peerId.toLowerCase() ||
+        conversation.name.toLowerCase() == peerName.toLowerCase());
 
     if (idx >= 0) {
-      final old = list.removeAt(idx);
+      final old = list[idx];
+      if (messageId != null && old.lastMessageId == messageId) return;
+      list.removeAt(idx);
       list.insert(
         0,
         old.copyWith(
@@ -182,6 +353,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           time: time,
           unread: old.unread + 1,
           isOnline: true,
+          lastMessageId: messageId,
         ),
       );
     } else {
@@ -194,23 +366,24 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           time: time,
           unread: 1,
           isOnline: true,
+          lastMessageId: messageId,
         ),
       );
     }
     state = state.copyWith(conversations: list);
   }
 
-  /// Gönderilen mesajı listenin en başına günceller
   void recordOutgoingMessage({
     required String peerId,
     required String peerName,
     required String text,
     required String time,
+    String? messageId,
   }) {
     final list = List<ModernConversation>.from(state.conversations);
-    final idx = list.indexWhere((c) =>
-        c.id.toLowerCase() == peerId.toLowerCase() ||
-        c.name.toLowerCase() == peerName.toLowerCase());
+    final idx = list.indexWhere((conversation) =>
+        conversation.id.toLowerCase() == peerId.toLowerCase() ||
+        conversation.name.toLowerCase() == peerName.toLowerCase());
 
     if (idx >= 0) {
       final old = list.removeAt(idx);
@@ -220,6 +393,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           lastMessage: text,
           time: time,
           unread: 0,
+          lastMessageId: messageId,
         ),
       );
     } else {
@@ -232,28 +406,42 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           time: time,
           unread: 0,
           isOnline: true,
+          lastMessageId: messageId,
         ),
       );
     }
     state = state.copyWith(conversations: list);
   }
 
-  /// Mesajları okundu olarak işaretle
   void markAsRead(String peerId) {
     final list = List<ModernConversation>.from(state.conversations);
-    final idx = list.indexWhere((c) =>
-        c.id.toLowerCase() == peerId.toLowerCase() ||
-        c.name.toLowerCase() == peerId.toLowerCase());
+    final idx = list.indexWhere((conversation) =>
+        conversation.id.toLowerCase() == peerId.toLowerCase() ||
+        conversation.name.toLowerCase() == peerId.toLowerCase());
     if (idx >= 0) {
       list[idx] = list[idx].copyWith(unread: 0);
       state = state.copyWith(conversations: list);
     }
+
+    if (SupabaseService.instance.isInitialized) {
+      unawaited(_markRemoteMessagesRead(peerId));
+    }
   }
 
-  /// Sabitleme durumunu değiştir
+  Future<void> _markRemoteMessagesRead(String peerId) async {
+    try {
+      await SupabaseService.instance.client
+          .from('messages')
+          .update({'is_read': true})
+          .eq('receiver_id', profileIdentity.value.id)
+          .eq('sender_id', peerId)
+          .eq('is_read', false);
+    } catch (_) {}
+  }
+
   void togglePin(ModernConversation conv) {
     final list = List<PinnedUser>.from(state.pinned);
-    final idx = list.indexWhere((p) => p.id == conv.id);
+    final idx = list.indexWhere((pinned) => pinned.id == conv.id);
     if (idx >= 0) {
       list.removeAt(idx);
     } else {
@@ -270,20 +458,28 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     state = state.copyWith(pinned: list);
   }
 
-  /// Konuşmayı sil
   void deleteConversation(String convId) {
     final convs = state.conversations.where((c) => c.id != convId).toList();
     final pins = state.pinned.where((p) => p.id != convId).toList();
     state = state.copyWith(conversations: convs, pinned: pins);
   }
 
-  /// Tüm mesajları temizle
   void clearAll() {
     state = const ConversationsState(conversations: [], pinned: []);
   }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _pollTimer?.cancel();
+    _crossTabSubscription?.cancel();
+    if (_supabaseChannel != null && SupabaseService.instance.isInitialized) {
+      SupabaseService.instance.client.removeChannel(_supabaseChannel!);
+    }
+    super.dispose();
+  }
 }
 
-/// Global Conversations Riverpod Provider
 final conversationsProvider =
     StateNotifierProvider<ConversationsNotifier, ConversationsState>((ref) {
   return ConversationsNotifier();

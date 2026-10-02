@@ -14,8 +14,15 @@ import 'features/voice_rooms/presentation/voice_rooms_store.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Load env variables
-  await dotenv.load();
+  // .env is supplied by CI/release builds, but it is intentionally not
+  // committed. A fresh checkout must still start; SupabaseService has safe
+  // client-side fallbacks and the remaining optional voice settings can be
+  // added later.
+  try {
+    await dotenv.load(isOptional: true);
+  } catch (e) {
+    debugPrint('[Config] .env yüklenemedi: $e');
+  }
   await SupabaseService.instance.initialize();
 
   // Kullanıcı kimliğini SharedPreferences'dan yükle
